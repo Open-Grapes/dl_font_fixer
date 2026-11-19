@@ -1,6 +1,7 @@
 """Entry point.
 
-  dl_font_fixer.exe                       open the window
+  dl_font_fixer.exe                       open the window (asks Windows for administrator rights first)
+  dl_font_fixer.exe --no-elevate          open the window without asking for administrator rights
   dl_font_fixer.exe --scan-report FILE    scan and write a JSON report (no changes), for build tests
 """
 
@@ -29,6 +30,12 @@ def main():
     args = sys.argv[1:]
     if args[:1] == ["--scan-report"] and len(args) > 1:
         return scan_report(args[1])
+    # The app always runs as administrator: fonts for all users, the font cache and the reboot queue need it.
+    # If the Windows prompt is declined it still opens, limited to fonts installed for the current user.
+    from . import winapi
+    if "--no-elevate" not in args and not winapi.is_admin():
+        if winapi.relaunch_as_admin(["--no-elevate"]):
+            return 0
     from .gui import main as gui_main
     return gui_main(sys.argv)
 

@@ -23,23 +23,23 @@ EXPLAIN = {
     "ghost": ("GHOST ENTRY",
               "Windows still lists this font in the registry, but the file is gone. Apps (Adobe especially) "
               "see a font that can't load: missing glyphs, red-dot conflicts, fallback fonts.",
-              "Purge removes the dead registry entry."),
+              "Delete removes the dead registry entry."),
     "adobe": ("ADOBE FONTS CONFLICT",
               "The same font is also activated through Adobe Fonts (Creative Cloud). Two copies with the same "
               "name fight each other: Adobe apps flag it as missing or conflicting, or pick the wrong copy with "
               "missing weights.",
-              "Purge the local copy (checked below), then RESTART ADOBE CC so Creative Cloud re-syncs it."),
+              "Delete your installed copy (ticked below; the Adobe copy stays), then RESTART ADOBE CC so Creative Cloud re-syncs it."),
     "duplicate": ("DUPLICATE INSTALL",
                   "The same font (PostScript name) is installed more than once, often once for you and once for "
                   "all users, or two versions of the file. Apps may use the older or broken one.",
-                  "Purge the extra copies (checked); one copy of each is kept."),
+                  "Delete the extra copies (ticked); one copy of each is kept."),
     "orphan": ("ORPHAN FILE",
                "The file sits in a Fonts folder but nothing registers it, so Windows doesn't load it, and Font "
                "Settings can't remove it. Usually left behind by a half-finished install or uninstall.",
-               "Purge deletes the leftover file."),
+               "Delete removes the leftover file."),
     "unreadable": ("BROKEN FILE",
                    "The file is in the Fonts folder but isn't a readable font (damaged or wrong format).",
-                   "Purge deletes it."),
+                   "Delete removes it."),
 }
 
 
@@ -426,7 +426,6 @@ def c(text, color):
 
 class Inspector(QWidget):
     purge_requested = Signal(list, bool)
-    locks_requested = Signal(list)
     adobe_restart = Signal()
 
     def __init__(self, parent=None):
@@ -490,7 +489,7 @@ class Inspector(QWidget):
         self.diag.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self.diag)
 
-        h = QLabel("// FACES   (checked = will be purged)")
+        h = QLabel("// FACES   (ticked = will be deleted)")
         h.setObjectName("h")
         lay.addWidget(h)
         self.tree = QTreeWidget()
@@ -504,41 +503,20 @@ class Inspector(QWidget):
         self.tree.header().setSectionResizeMode(1, QHeaderView.Interactive)
         self.tree.header().setSectionResizeMode(2, QHeaderView.Interactive)
         self.tree.itemChanged.connect(lambda *_: self._update_buttons())
+        self.tree.currentItemChanged.connect(lambda *_: self._update_buttons())
         self.tree.itemDoubleClicked.connect(self._reveal)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._menu)
         lay.addWidget(self.tree, 1)
 
-        row = QHBoxLayout()
-        self.b_all = QPushButton("ALL")
-        self.b_all.clicked.connect(lambda: self._check_all(True))
-        self.b_none = QPushButton("NONE")
-        self.b_none.clicked.connect(lambda: self._check_all(False))
-        self.b_locks = QPushButton("⌕ LOCKS")
-        self.b_locks.setToolTip("Ask Windows (Restart Manager) which programs have these font files open")
-        self.b_locks.clicked.connect(lambda: self.locks_requested.emit(self.checked_faces() or self._all_local()))
-        self.b_folder = QPushButton("FOLDER")
-        self.b_folder.clicked.connect(self._open_folder)
-        for b in (self.b_all, self.b_none, self.b_locks, self.b_folder):
-            b.setStyleSheet("text-align: center; padding: 8px 6px;")
-            b.setMinimumWidth(60)
-            row.addWidget(b)
-
-        self.locks = QLabel("")
-        self.locks.setWordWrap(True)
-        self.locks.setTextFormat(Qt.RichText)
-        self.locks.hide()
-        lay.addWidget(self.locks)
-
         lay = flay      # the rest stays visible below the scrolling part
-        lay.addLayout(row)
-        self.unlock = QCheckBox("Auto-unlock (stop FontCache / restart Explorer if locked)")
-        self.unlock.setChecked(True)
-        lay.addWidget(self.unlock)
-        self.b_purge = QPushButton("⚠  PURGE CHECKED FACES")
+        self.b_folder = QPushButton("📂  SHOW FILE IN FOLDER")
+        self.b_folder.clicked.connect(self._open_folder)
+        lay.addWidget(self.b_folder)
+        self.b_purge = QPushButton("⚠  DELETE TICKED FACES")
         self.b_purge.setObjectName("danger")
         self.b_purge.setMinimumHeight(42)
-        self.b_purge.clicked.connect(lambda: self.purge_requested.emit(self.checked_faces(), self.unlock.isChecked()))
+        self.b_purge.clicked.connect(lambda: self.purge_requested.emit(self.checked_faces(), True))
         lay.addWidget(self.b_purge)
         self.b_adobe = QPushButton("⟳  RESTART ADOBE CREATIVE CLOUD")
         self.b_adobe.setObjectName("primary")
@@ -550,7 +528,6 @@ class Inspector(QWidget):
     # ---- content
     def show_families(self, fams):
         self.families = fams
-        self.locks.hide()
         self.tree.blockSignals(True)
         self.tree.clear()
         if not fams:
@@ -593,10 +570,17 @@ class Inspector(QWidget):
                                  f'font-weight:bold">■ {t}</span><br><span style="color:{T.TEXT}">{esc(why)}</span>'
                                  f'<br><span style="color:{T.CYAN}">→ {esc(fix)}</span></div>')
             self.diag.setText("".join(parts))
+        elif not any(f.local_faces for f in fams):
+            self.diag.setText(c("■ ADOBE FONTS ONLY. ", T.VIOLET) +
+                              c("This font comes from Adobe Fonts and is managed by Creative Cloud, not installed "
+                                "in Windows. dl_font_fixer can't delete it, and Windows wouldn't either: Creative "
+                                "Cloud would just put it back. To remove it, open Creative Cloud › Fonts (or "
+                                "fonts.adobe.com › My Adobe Fonts) and deactivate it.", T.TEXT))
         else:
             self.diag.setText(c("■ NO PROBLEMS FOUND. ", T.GREEN) +
                               c("This family is registered correctly and every file exists. You can still "
-                                "check faces below and purge them to remove the font completely.", T.TEXT))
+                                "tick faces below (or right-click the family) to delete the font completely.",
+                                T.TEXT))
         self.b_adobe.setVisible("adobe" in issues)
 
         for fam in fams:
@@ -682,51 +666,55 @@ class Inspector(QWidget):
         self.tree.blockSignals(False)
         self._update_buttons()
 
+    def _folder_face(self):
+        """The face whose file SHOW FILE opens: the highlighted row, else the first local file on disk."""
+        it = self.tree.currentItem()
+        if it:
+            return it.data(0, Qt.UserRole)
+        return next((f for f in self._all_local() if f.exists), None)
+
     def _update_buttons(self):
         n = len(self.checked_faces())
-        self.b_purge.setEnabled(n > 0)
-        self.b_purge.setText(f"⚠  PURGE {n} CHECKED FACE{'S' if n != 1 else ''}" if n else "⚠  PURGE CHECKED FACES")
-        has = bool(self.families)
-        for b in (self.b_all, self.b_none, self.b_locks, self.b_folder):
-            b.setEnabled(has)
-
-    def show_locks(self, result):
-        lines = []
-        for path, lk in result.items():
-            name = esc(Path(path).name)
-            if lk:
-                who = ", ".join(esc(x.get("service") or x.get("exe") or x["name"]) + f" <span style='color:{T.DIM}'>"
-                                f"(pid {x['pid']})</span>" for x in lk)
-                lines.append(f"<span style='color:{T.AMBER}'>🔒 {name}</span> &nbsp;← {who}")
+        local = self._all_local()
+        if n:
+            self.b_purge.setEnabled(True)
+            self.b_purge.setText(f"⚠  DELETE {n} TICKED FACE{'S' if n != 1 else ''}")
+        else:
+            self.b_purge.setEnabled(False)
+            if self.families and not local:
+                self.b_purge.setText("ADOBE FONTS · REMOVE IT IN CREATIVE CLOUD")
+            elif self.families and not any(f.purgeable for f in local):
+                self.b_purge.setText("WINDOWS SYSTEM FONT · PROTECTED")
             else:
-                lines.append(f"<span style='color:{T.GREEN}'>✓ {name}</span> <span style='color:{T.DIM}'>"
-                             f"not open in any program</span>")
-        if not lines:
-            lines = [c("No files on disk to check (ghost entries have no file).", T.DIM)]
-        self.locks.setText(f"<div style='font-family:Consolas;font-size:12px'>{'<br>'.join(lines)}</div>")
-        self.locks.show()
+                self.b_purge.setText("⚠  DELETE TICKED FACES")
+        face = self._folder_face() if self.families else None
+        if face is None:
+            self.b_folder.setEnabled(False)
+            self.b_folder.setToolTip("")
+        elif face.scope == "adobe":
+            self.b_folder.setEnabled(False)
+            self.b_folder.setToolTip("Adobe Fonts are stored hidden inside Creative Cloud's sync folder; "
+                                     "manage them in the Creative Cloud app.")
+        elif not face.exists:
+            self.b_folder.setEnabled(False)
+            self.b_folder.setToolTip("Ghost entry: the file doesn't exist")
+        else:
+            self.b_folder.setEnabled(True)
+            self.b_folder.setToolTip(face.path)
 
     def _current_face(self):
         it = self.tree.currentItem()
         return it.data(0, Qt.UserRole) if it else None
 
     def _reveal(self, it, col=0):
-        face = it.data(0, Qt.UserRole)
-        if face and os.path.exists(face.path):
+        face = it.data(0, Qt.UserRole) if isinstance(it, QTreeWidgetItem) else it
+        if face and face.scope != "adobe" and os.path.exists(face.path):
             subprocess.Popen(["explorer.exe", "/select,", face.path])
-        elif face:
-            folder = Path(face.path).parent
-            if folder.exists():
-                os.startfile(folder)
 
     def _open_folder(self):
-        face = self._current_face() or (self._all_local() or [None])[0]
+        face = self._folder_face()
         if face:
-            it = self.tree.currentItem()
-            if it:
-                self._reveal(it)
-            elif os.path.exists(Path(face.path).parent):
-                os.startfile(Path(face.path).parent)
+            self._reveal(face)
 
     def _menu(self, pos):
         it = self.tree.itemAt(pos)
@@ -734,7 +722,17 @@ class Inspector(QWidget):
             return
         face = it.data(0, Qt.UserRole)
         m = QMenu(self)
-        m.addAction("Show in folder", lambda: self._reveal(it))
+        a = m.addAction("⚠  Delete this face completely…", lambda: self.purge_requested.emit([face], True))
+        if not face.purgeable:
+            a.setEnabled(False)
+            a.setText("Adobe Fonts: remove it in Creative Cloud" if face.scope == "adobe"
+                      else "Windows system font: protected")
+        m.addSeparator()
+        a = m.addAction("Show file in folder", lambda: self._reveal(face))
+        a.setEnabled(face.scope != "adobe" and face.exists)
+        m.addAction("Tick all", lambda: self._check_all(True))
+        m.addAction("Untick all", lambda: self._check_all(False))
+        m.addSeparator()
         m.addAction("Copy file path", lambda: QGuiApplication.clipboard().setText(face.path))
         if face.reg:
             m.addAction("Copy registry entries", lambda: QGuiApplication.clipboard().setText(
@@ -779,7 +777,6 @@ class MainWindow(QMainWindow):
         hsplit.addWidget(self._build_center())
         self.inspector = Inspector()
         self.inspector.purge_requested.connect(self.purge)
-        self.inspector.locks_requested.connect(self.scan_locks)
         self.inspector.adobe_restart.connect(self.restart_adobe)
         self.inspector.setMinimumWidth(460)
         hsplit.addWidget(self.inspector)
@@ -827,8 +824,8 @@ class MainWindow(QMainWindow):
         self.log(f"{APP_NAME} v{APP_VERSION}  ·  {'ADMINISTRATOR' if self.admin else 'standard user'}  ·  "
                  f"backups in {BACKUP_DIR}", "info")
         if not self.admin:
-            self.log("Running without admin rights: fonts installed for you can be fixed; fonts installed for all "
-                     "users, the font cache and the reboot queue need ADMIN (top right).", "warn")
+            self.log("Windows' administrator prompt was declined: only fonts installed for you can be fixed. "
+                     "Close and reopen dl_font_fixer and click Yes to fix everything.", "warn")
         QTimer.singleShot(150, self.refresh_status)
         QTimer.singleShot(250, self.scan)
 
@@ -845,7 +842,9 @@ class MainWindow(QMainWindow):
         logo.setStyleSheet(f"font-family: {T.MONO}; font-size: 19px; letter-spacing: 2px; border: none;"
                            f"background: transparent;")
         lay.addWidget(logo)
-        ver = QLabel(f"v{APP_VERSION}  ·  SCAN / UNLOCK / PURGE")
+        mode = (f'<span style="color:{T.GREEN}">ADMIN</span>' if self.admin else
+                f'<span style="color:{T.AMBER}">LIMITED (no admin)</span>')
+        ver = QLabel(f"v{APP_VERSION}  ·  SCAN / UNLOCK / PURGE  ·  {mode}")
         ver.setStyleSheet(f"font-family: {T.MONO}; font-size: 11px; color: {T.DIM}; border: none; "
                           f"background: transparent; padding-top: 4px;")
         lay.addWidget(ver)
@@ -856,9 +855,7 @@ class MainWindow(QMainWindow):
         self.chip_adobe.clicked.connect(self.restart_adobe)
         self.chip_reboot = Chip("REBOOT QUEUE")
         self.chip_reboot.clicked.connect(self.show_pending)
-        self.chip_admin = Chip("ADMIN")
-        self.chip_admin.clicked.connect(self.elevate)
-        for ch in (self.chip_cache, self.chip_adobe, self.chip_reboot, self.chip_admin):
+        for ch in (self.chip_cache, self.chip_adobe, self.chip_reboot):
             lay.addWidget(ch)
         self.b_scan = QPushButton("⟳  RESCAN")
         self.b_scan.setObjectName("primary")
@@ -879,7 +876,7 @@ class MainWindow(QMainWindow):
                                 ("duplicate", "DUPLICATES", T.AMBER), ("orphan", "ORPHANS", T.BLUE),
                                 ("unreadable", "BROKEN", T.RED)):
             t = StatTile(label, col, key)
-            t.clicked.connect(lambda _=False, k=key: self.set_filter("all" if k == "faces" else k))
+            t.clicked.connect(lambda _=False, k=key: self.show_everything("all" if k == "faces" else k))
             lay.addWidget(t, 1)
             self.tiles[key] = t
         return w
@@ -965,8 +962,70 @@ class MainWindow(QMainWindow):
         self.view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.view.setMouseTracking(True)
         self.view.selectionModel().selectionChanged.connect(self._selection_changed)
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._family_menu)
+        self.view.installEventFilter(self)
         lay.addWidget(self.view, 1)
+        self.empty = QWidget()
+        el = QVBoxLayout(self.empty)
+        el.setContentsMargins(20, 40, 20, 20)
+        el.setSpacing(14)
+        self.empty_text = QLabel("")
+        self.empty_text.setWordWrap(True)
+        self.empty_text.setTextFormat(Qt.RichText)
+        self.empty_text.setAlignment(Qt.AlignCenter)
+        el.addWidget(self.empty_text)
+        self.empty_btn = QPushButton("SHOW ALL LOCATIONS, CLEAR SEARCH")
+        self.empty_btn.setObjectName("primary")
+        self.empty_btn.clicked.connect(lambda: self.show_everything(self.filter))
+        el.addWidget(self.empty_btn, 0, Qt.AlignCenter)
+        el.addStretch()
+        self.empty.hide()
+        lay.addWidget(self.empty, 1)
         return w
+
+    def eventFilter(self, obj, ev):
+        if obj is self.view and ev.type() == ev.Type.KeyPress and ev.key() == Qt.Key_Delete:
+            self.delete_families(self.selected_families())
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _family_menu(self, pos):
+        idx = self.view.indexAt(pos)
+        if not idx.isValid():
+            return
+        if not self.view.selectionModel().isSelected(idx):
+            self.view.selectionModel().select(idx, self.view.selectionModel().SelectionFlag.ClearAndSelect)
+        fams = self.selected_families()
+        local = [f for fam in fams for f in fam.local_faces]
+        deletable = [f for f in local if f.purgeable]
+        m = QMenu(self)
+        name = fams[0].name if len(fams) == 1 else f"{len(fams)} families"
+        a = m.addAction(f"\u26a0  Delete {name} completely\u2026", lambda: self.delete_families(fams))
+        if not deletable:
+            a.setEnabled(False)
+            a.setText("Adobe Fonts only: remove it in Creative Cloud" if not local
+                      else "Windows system font: protected")
+        m.addSeparator()
+        face = next((f for f in local if f.exists), None)
+        a = m.addAction("Show file in folder",
+                        lambda: subprocess.Popen(["explorer.exe", "/select,", face.path]) if face else None)
+        a.setEnabled(face is not None)
+        m.addAction("Copy family name", lambda: QGuiApplication.clipboard().setText(
+            "\n".join(f.name for f in fams)))
+        if any("adobe" in fam.scopes for fam in fams):
+            m.addSeparator()
+            m.addAction("Restart Adobe Creative Cloud", self.restart_adobe)
+        m.exec(self.view.viewport().mapToGlobal(pos))
+
+    def delete_families(self, fams):
+        faces = [f for fam in fams for f in fam.local_faces if f.purgeable]
+        if not faces:
+            if fams:
+                info(self, "Can't delete", "Nothing here can be deleted from Windows: Adobe Fonts are managed in "
+                     "the Creative Cloud app, and core Windows fonts are protected.")
+            return
+        self.purge(faces, True)
 
     # ---- logging
     def log(self, text, level="info"):
@@ -1042,6 +1101,16 @@ class MainWindow(QMainWindow):
             t.setChecked(k == key and key != "all")
         self.apply_filter()
 
+    def show_everything(self, key):
+        """Filter by `key` and reset location and search, so what's counted on the tile is what's shown."""
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.scope = "any"
+        for k, b in self.nav_scope.items():
+            b.setChecked(k == "any")
+        self.set_filter(key)
+
     def set_scope(self, key):
         self.scope = key
         for k, b in self.nav_scope.items():
@@ -1072,7 +1141,31 @@ class MainWindow(QMainWindow):
             out.sort(key=lambda f: (f.severity(), f.name.lower()))
         self.model.set_items(out)
         label = dict(FILTERS).get(self.filter, "")
-        self.list_head.setText(f"// FONT FAMILIES  ·  {label}  ·  {len(out)} SHOWN")
+        crit = [label]
+        if self.scope != "any":
+            crit.append(dict(SCOPES)[self.scope])
+        if q:
+            crit.append(f'"{q}"')
+        self.list_head.setText(f"// FONT FAMILIES  ·  {'  +  '.join(crit)}  ·  {len(out)} SHOWN")
+        narrowed = self.scope != "any" or bool(q)
+        if not out and self.families:
+            why = [f"<b>{esc(label)}</b>"]
+            if self.scope != "any":
+                why.append(f"location <b>{esc(dict(SCOPES)[self.scope])}</b>")
+            if q:
+                why.append(f"search <b>&quot;{esc(q)}&quot;</b>")
+            tip = ""
+            if self.scope == "adobe" and self.filter not in ("all", "adobe"):
+                tip = ("<br><br>Adobe Fonts copies never have these problems: they live inside Creative Cloud, "
+                       "not in Windows.")
+            self.empty_text.setText(f"<span style='color:{T.DIM};font-size:15px'>Nothing matches "
+                                    f"{' + '.join(why)}.{tip}</span>")
+            self.empty_btn.setVisible(narrowed)
+            self.view.hide()
+            self.empty.show()
+        else:
+            self.empty.hide()
+            self.view.show()
         sel = self.view.selectionModel()
         restored = False
         for row, fam in enumerate(out):
@@ -1113,43 +1206,9 @@ class MainWindow(QMainWindow):
         self.chip_reboot.set_state(f"REBOOT QUEUE {n}", T.AMBER if n else T.DIM,
                                    f"{n} font file(s) will be deleted at the next restart" if n
                                    else "Nothing queued for the next restart")
-        if self.admin:
-            self.chip_admin.set_state("ADMIN", T.GREEN, "Running as administrator")
-        else:
-            self.chip_admin.set_state("ADMIN OFF · ELEVATE", T.AMBER, "Click to restart as administrator")
 
     # ---- actions
-    def elevate(self):
-        if self.admin:
-            info(self, "Administrator", "Already running as administrator.")
-            return
-        if ask(self, "Restart as administrator",
-               "Restart dl_font_fixer with administrator rights?<br><br>Needed to fix fonts installed "
-               "<b>for all users</b> (C:\\Windows\\Fonts, HKLM), rebuild the font cache and queue locked files "
-               "for deletion at the next restart.", ok="ELEVATE"):
-            if winapi.relaunch_as_admin():
-                self._save()
-                QApplication.quit()
-            else:
-                self.log("Elevation was cancelled", "warn")
-
-    def scan_locks(self, faces):
-        paths = [f.path for f in faces if f.exists]
-        self.log(f"Asking Restart Manager who has {len(paths)} file(s) open…", "cmd")
-
-        def done(res):
-            if res is None:
-                return
-            locked = {p: lk for p, lk in res.items() if lk}
-            for p, lk in locked.items():
-                self.log(f"{Path(p).name} locked by " + ", ".join(
-                    f"{x.get('service') or x.get('exe') or x['name']} ({x['pid']})" for x in lk), "warn")
-            self.log(f"{len(locked)} of {len(res)} file(s) locked", "warn" if locked else "ok")
-            self.inspector.show_locks(res)
-
-        self.run_bg(actions.check_locks, paths, on_done=done, label="CHECKING LOCKS…", _wants_log=False)
-
-    def purge(self, faces, unlock):
+    def purge(self, faces, unlock=True):
         faces = [f for f in faces if f.purgeable]
         if not faces:
             return
@@ -1164,15 +1223,21 @@ class MainWindow(QMainWindow):
         warn = ""
         if need_admin and not self.admin:
             warn += (f"<p style='color:{T.AMBER}'>⚠ {len(need_admin)} of these are installed for all users. "
-                     f"Without ADMIN only their per-user parts can be removed.</p>")
+                     f"Without administrator rights only their per-user parts can be removed (reopen the app and "
+                     f"click Yes on the Windows prompt).</p>")
         if adobe["apps"]:
             warn += (f"<p style='color:{T.AMBER}'>⚠ Close {', '.join(adobe['apps'])} first: open apps keep "
                      f"fonts loaded.</p>")
-        html = (f"<p>Remove <b>{len(faces)}</b> font file(s) from <b>{len(fams)}</b> famil"
-                f"{'y' if len(fams) == 1 else 'ies'}: registry entry and file, unlocking them if needed.</p>"
+        if any("adobe" in fam.scopes for fam in self.families if fam.name in fams):
+            warn += (f"<p style='color:{T.VIOLET}'>The Adobe Fonts copy is not touched: Creative Cloud keeps "
+                     f"providing it.</p>")
+        html = (f"<p style='color:{T.RED}'><b>⚠ This deletes the font from Windows completely.</b></p>"
+                f"<p>Remove <b>{len(faces)}</b> font file(s) from <b>{len(fams)}</b> famil"
+                f"{'y' if len(fams) == 1 else 'ies'}: unload it, delete its registry entry and its file, "
+                f"unlocking the file if a program holds it.</p>"
                 f"<table style='font-family:Consolas;font-size:12px'>{rows}</table>{more}{warn}"
                 f"<p style='color:{T.DIM}'>A backup of every file is saved first (BACKUPS / RESTORE).</p>")
-        if not ask(self, "Purge fonts", html, ok="PURGE", danger=True):
+        if not ask(self, "Delete fonts", html, ok="DELETE", danger=True):
             return
         had_adobe = any("adobe" in f.issues for f in faces)
         self.log(f"PURGE {len(faces)} face(s): {', '.join(fams[:6])}{' …' if len(fams) > 6 else ''}", "cmd")
@@ -1188,8 +1253,9 @@ class MainWindow(QMainWindow):
                         f"them.</p>")
             if res["failed"]:
                 msg += (f"<p style='color:{T.RED}'>{len(res['failed'])} file(s) could not be removed: "
-                        f"{esc(', '.join(Path(p).name for p in res['failed'][:8]))}. Restart as ADMIN and try "
-                        f"again (they can then be queued for the next restart).</p>")
+                        f"{esc(', '.join(Path(p).name for p in res['failed'][:8]))}. Reopen dl_font_fixer, "
+                        f"click Yes on the administrator prompt and try again (they can then be queued for the "
+                        f"next restart).</p>")
             if had_adobe and actions.adobe_status()["running"]:
                 msg += (f"<p>These fonts were also in Adobe Fonts. Restart Creative Cloud now so it re-syncs "
                         f"the Adobe copy?</p>")
@@ -1215,9 +1281,8 @@ class MainWindow(QMainWindow):
 
     def rebuild_cache(self):
         if not self.admin:
-            if ask(self, "Rebuild font cache", "Rebuilding the Windows font cache needs administrator rights."
-                                               "<br><br>Restart as administrator now?", ok="ELEVATE"):
-                self.elevate()
+            info(self, "Rebuild font cache", "Rebuilding the Windows font cache needs administrator rights. "
+                 "Close dl_font_fixer, open it again and click <b>Yes</b> on the Windows prompt.")
             return
         if ask(self, "Rebuild font cache",
                "Stop the <b>Windows Font Cache Service</b>, delete <b>FNTCACHE.DAT</b> and the cache files, "
@@ -1252,7 +1317,7 @@ class MainWindow(QMainWindow):
                     f"<div style='font-family:Consolas;font-size:12px'>{rows}</div>"
                     f"<p style='color:{T.DIM}'>Restart Windows to finish. No Safe Mode needed.</p>")
         else:
-            html = "Nothing queued. Locked fonts that can't be deleted right away are queued here (needs ADMIN)."
+            html = "Nothing queued. Locked fonts that can't be deleted right away are queued here."
         info(self, "Reboot queue", html, wide=bool(ops))
 
     def show_backups(self):

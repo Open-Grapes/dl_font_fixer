@@ -92,8 +92,14 @@ def start_service(name, log=_nolog):
         time.sleep(0.25)
 
 
+_shell_tok = None
+
+
 def kill_explorer(log=_nolog):
+    global _shell_tok
     ps = procs_named(["explorer.exe"])
+    if ps and _shell_tok is None:
+        _shell_tok = winapi.shell_token()      # to start it again with normal (non-admin) rights
     for p in ps:
         try:
             p.kill()
@@ -108,7 +114,7 @@ def kill_explorer(log=_nolog):
 def start_explorer(log=_nolog):
     time.sleep(1.5)                     # Windows 11 often restarts the shell by itself
     if not procs_named(["explorer.exe"]):
-        subprocess.Popen([str(WINDIR / "explorer.exe")], creationflags=NO_WINDOW)
+        winapi.run_as_user([WINDIR / "explorer.exe"], token=_shell_tok)
     log("explorer.exe running again", "ok")
 
 
@@ -178,7 +184,7 @@ def restart_adobe_cc(log=_nolog):
         log("Creative Cloud closed", "ok")
     if exe:
         time.sleep(1)
-        subprocess.Popen([exe], creationflags=NO_WINDOW, cwd=str(Path(exe).parent))
+        winapi.run_as_user([exe], cwd=str(Path(exe).parent))
         log(f"Started {exe}", "ok")
         log("Creative Cloud re-syncs Adobe Fonts in about a minute. In Photoshop / Illustrator use "
             "Type > Resolve Missing Fonts or reopen the document.", "info")
@@ -446,7 +452,7 @@ def purge(faces, log=_nolog, unlock=True):
         if target != p:
             continue    # renamed: Windows no longer loads it, it's harmless until deleted
         res["failed"].append(p)
-        log(f"could not remove {p}. Restart as administrator to queue it for the next reboot.", "err")
+        log(f"could not remove {p}. It needs administrator rights to queue it for the next reboot.", "err")
 
     for s in stopped_services:
         start_service(s, log)

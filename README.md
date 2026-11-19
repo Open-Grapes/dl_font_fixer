@@ -29,15 +29,21 @@ Fonts are grouped by family (every weight, italic and variable file under one ca
 | **ORPHAN** | A font file sits in a Fonts folder but nothing registers it |
 | **BROKEN** | The file isn't a readable font |
 
-The inspector explains each problem in plain words and pre-checks the faces that should go (for duplicates one
-copy is kept; Adobe Fonts copies and core Windows fonts like Segoe UI or Arial are never removed).
+The inspector explains each problem in plain words and ticks the faces that should go (for duplicates one
+copy is kept). **Right-click a family** (or press **Delete**) to remove the whole font from Windows; a warning
+lists exactly what will be deleted first.
+
+**Adobe Fonts** are managed by Creative Cloud, not by Windows, so dl_font_fixer never deletes them (Creative
+Cloud would put them back anyway). For an Adobe-only font the delete and folder buttons are greyed out: deactivate
+it in Creative Cloud › Fonts instead. When the same font is installed by hand *and* in Adobe Fonts, deleting removes
+only your installed copy. Core Windows fonts like Segoe UI or Arial are protected too.
 
 ## Purge: what happens
 
 1. Every file is **backed up** to `%APPDATA%\dl_font_fixer\backups` (restore with *Backups / Restore*).
 2. The font is unloaded from the session (`RemoveFontResource`) and its `HKCU`/`HKLM` registry values are deleted.
-3. The file is deleted. If it's locked, the **Restart Manager** finds who holds it; with *Auto-unlock* the app
-   stops the Font Cache service and restarts Explorer, then tries again.
+3. The file is deleted. If it's locked, the **Restart Manager** finds who holds it, the app stops the Font Cache
+   service and restarts Explorer if needed, then tries again (programs holding it are listed in the console).
 4. Still locked? It's renamed to `.old` and, as administrator, queued for deletion at the next restart
    (`PendingFileRenameOperations`). Windows no longer loads it either way.
 
@@ -49,8 +55,9 @@ copy is kept; Adobe Fonts copies and core Windows fonts like Segoe UI or Arial a
 - **Restart Explorer**: Explorer keeps font files open for previews.
 - **Reboot queue**: font files waiting to be deleted at the next restart.
 
-Fonts installed only for you can be fixed without admin rights. Fonts installed for all users, the font cache and
-the reboot queue need administrator rights: click **ADMIN OFF · ELEVATE** in the top bar.
+The app asks Windows for administrator rights when it starts (fonts for all users, the font cache and the reboot
+queue need them); click **Yes**. If you click No it still opens, limited to fonts installed for your user.
+Creative Cloud and Explorer are always restarted with your normal rights, never as administrator.
 
 ## Build from source
 

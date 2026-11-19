@@ -52,6 +52,95 @@ def relaunch_as_admin(extra_args=()):
     return (r or 0) > 32
 
 
+# ---------------------------------------------------------------- start programs as the normal (non-admin) user
+
+if IS_WIN:
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR), ("lpDesktop", wintypes.LPWSTR),
+                    ("lpTitle", wintypes.LPWSTR), ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD), ("dwXCountChars", wintypes.DWORD),
+                    ("dwYCountChars", wintypes.DWORD), ("dwFillAttribute", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.DuplicateTokenEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, ctypes.c_int,
+                                          ctypes.c_int, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.CreateProcessWithTokenW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPCWSTR,
+                                                 wintypes.LPWSTR, wintypes.DWORD, ctypes.c_void_p,
+                                                 wintypes.LPCWSTR, ctypes.POINTER(STARTUPINFOW),
+                                                 ctypes.POINTER(PROCESS_INFORMATION)]
+    user32.GetShellWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+
+
+def shell_token():
+    """A copy of the desktop shell's (explorer's) access token: the user's normal, non-elevated rights.
+    Take it *before* killing Explorer to restart it later. Returns a handle or None."""
+    if not IS_WIN:
+        return None
+    pid = wintypes.DWORD(0)
+    hwnd = user32.GetShellWindow()
+    if hwnd:
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        try:
+            import psutil
+            me = psutil.Process().username()
+            pid.value = next(p.pid for p in psutil.process_iter(["name", "username"])
+                             if (p.info["name"] or "").lower() == "explorer.exe" and p.info["username"] == me)
+        except Exception:
+            return None
+    hproc = kernel32.OpenProcess(0x1000, False, pid.value)          # PROCESS_QUERY_LIMITED_INFORMATION
+    if not hproc:
+        return None
+    tok, dup = wintypes.HANDLE(), wintypes.HANDLE()
+    try:
+        if not advapi32.OpenProcessToken(hproc, 0x0002, ctypes.byref(tok)):     # TOKEN_DUPLICATE
+            return None
+        # TOKEN_QUERY | DUPLICATE | ASSIGN_PRIMARY | ADJUST_DEFAULT | ADJUST_SESSIONID, SecurityImpersonation, Primary
+        if not advapi32.DuplicateTokenEx(tok, 0x0008 | 0x0002 | 0x0001 | 0x0080 | 0x0100, None, 2, 1,
+                                         ctypes.byref(dup)):
+            return None
+        return dup
+    finally:
+        if tok:
+            kernel32.CloseHandle(tok)
+        kernel32.CloseHandle(hproc)
+
+
+def run_as_user(cmd, cwd=None, token=None):
+    """Start `cmd` (list) with the user's normal rights even when this app runs as administrator, so
+    Creative Cloud / Explorer don't end up running elevated. Falls back to a plain start."""
+    if is_admin():
+        tok = token or shell_token()
+        if tok:
+            si = STARTUPINFOW()
+            si.cb = ctypes.sizeof(si)
+            pi = PROCESS_INFORMATION()
+            line = ctypes.create_unicode_buffer(subprocess.list2cmdline([str(c) for c in cmd]))
+            ok = advapi32.CreateProcessWithTokenW(tok, 0, None, line, 0, None, cwd, ctypes.byref(si),
+                                                  ctypes.byref(pi))
+            if token is None:
+                kernel32.CloseHandle(tok)
+            if ok:
+                kernel32.CloseHandle(pi.hThread)
+                kernel32.CloseHandle(pi.hProcess)
+                return True
+    subprocess.Popen([str(c) for c in cmd], cwd=cwd, creationflags=NO_WINDOW)
+    return False
+
+
 # ---------------------------------------------------------------- font resources
 
 HWND_BROADCAST = 0xFFFF
