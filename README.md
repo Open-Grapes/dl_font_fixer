@@ -1,10 +1,23 @@
 # dl_font_fixer
 
-A Windows tool for fonts that won't go away. It finds **ghost registry entries**, **orphan files**, **duplicate
+A Windows and Mac tool for fonts that won't go away. It finds **ghost registry entries**, **orphan files**, **duplicate
 installs** and **Adobe Fonts conflicts**, tells you which program is **locking** a font file, and **purges** fonts
 completely (registry + file), even when Windows says the file is in use. No CMD, no Safe Mode.
 
-**Download:** see [Releases](../../releases). Get `dl_font_fixer-windows.zip`, unzip it and run `dl_font_fixer.exe`.
+**Download:** see [Releases](../../releases).
+
+- **Windows:** `dl_font_fixer-windows.zip`, unzip it and run `dl_font_fixer.exe`.
+- **Mac:** `dl_font_fixer-mac-apple-silicon.dmg` (M1 and later) or `dl_font_fixer-mac-intel.dmg`. Drag the app to
+  Applications. The first time, macOS blocks it because it isn't notarized: System Settings › Privacy & Security ›
+  **Open Anyway**.
+
+## On a Mac
+
+Macs have no font registry, so there are no ghost entries or orphans: a font is installed when its file is in
+`~/Library/Fonts` (you) or `/Library/Fonts` (all users). dl_font_fixer scans both, plus macOS's own fonts in
+`/System/Library/Fonts` (never touched) and Adobe Fonts, and shows Adobe conflicts, duplicates, broken files and
+recently added fonts. Deleting moves the file to the **Trash** (History can put it back until you empty it); fonts
+in `/Library/Fonts` ask for your password. Rebuild font cache clears your Mac's font caches (`atsutil`).
 
 ## The problem it solves
 
@@ -61,7 +74,8 @@ only your installed copy. Core Windows fonts like Segoe UI or Arial are protecte
   *in Recycle Bin (recoverable)* or *deleted (can't recover)* once the Recycle Bin is emptied. **Restore** puts a
   recoverable font back where it was, registry entry included.
 - **Check for updates**: asks GitHub for the latest version and installs it in place (also checked once a day;
-  the top bar shows UPDATE … AVAILABLE).
+  the top bar shows UPDATE … AVAILABLE). **Version history** shows what changed in every version.
+- **Theme**: Dark, Light or Match Windows (THEME in the top bar), switches straight away.
 
 The app asks Windows for administrator rights when it starts (fonts for all users, the font cache and the reboot
 queue need them); click **Yes**. If you click No it still opens, limited to fonts installed for your user.
@@ -69,11 +83,21 @@ Creative Cloud and Explorer are always restarted with your normal rights, never 
 
 ## Build from source
 
+Windows:
+
 ```
 py -3.13 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python run.py          # run
 .venv\Scripts\python build.py        # -> dist\Windows\dl_font_fixer-windows.zip
+```
+
+Mac (GitHub Actions builds both Mac versions on every push, see `.github/workflows/mac.yml`):
+
+```
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python tests/test_mac.py   # throwaway-font test: scan, Trash, History, restore
+.venv/bin/python build_mac.py        # -> dist/MacOS/dl_font_fixer-mac-<arch>.dmg
 ```
 
 `dl_font_fixer.exe --scan-report FILE` writes a JSON report of everything found without changing anything;

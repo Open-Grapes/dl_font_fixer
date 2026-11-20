@@ -6,9 +6,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractListModel, QEasingCurve, QModelIndex, QRect, QRectF, QSize, Qt, QThread,
+from PySide6.QtCore import (QUrl, QAbstractListModel, QEasingCurve, QModelIndex, QRect, QRectF, QSize, Qt, QThread,
                             QTimer, QVariantAnimation, Signal)
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon, QPainter,
+from PySide6.QtGui import (QDesktopServices, QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon, QPainter,
                            QPen)
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QDialog, QFrame,
                                QProgressBar, QTextBrowser,
@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication,
 
 from . import actions, scanner, updater, winapi
 from . import theme as T
-from .common import APP_NAME, APP_VERSION, asset, human_size, load_settings, save_settings
+from .common import (APP_NAME, APP_VERSION, BIN, IS_MAC, IS_WIN, OS_NAME, asset, human_size, load_settings,
+                     save_settings)
 
 EXPLAIN = {
     "ghost": ("GHOST ENTRY",
@@ -56,9 +57,14 @@ def ago(ts):
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
+def chrome(w):
+    """Title bar in the theme's colours (dark or light)."""
+    winapi.dark_title_bar(int(w.winId()), T.rgb(T.PANEL), T.DARK)
+
+
 def mono(px, bold=False):
     f = QFont()
-    f.setFamilies(["Cascadia Mono", "Consolas"])
+    f.setFamilies(["Cascadia Mono", "Consolas", "Menlo", "SF Mono"])
     f.setPixelSize(px)
     f.setBold(bold)
     return f
@@ -110,7 +116,7 @@ class GridRoot(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(T.BG))
-        p.setPen(QPen(qcolor(T.CYAN, 9), 1))
+        p.setPen(QPen(qcolor(T.CYAN, T.GRID_ALPHA), 1))
         step = 28
         for x in range(0, self.width(), step):
             p.drawLine(x, 0, x, self.height())
@@ -249,7 +255,7 @@ class Chip(QPushButton):
         self.color = color
         self.setToolTip(tip)
         self.setStyleSheet(f"QPushButton#chip {{ color: {color}; border-color: {T.LINE}; }}"
-                           f"QPushButton#chip:hover {{ border-color: {color}; background: rgba(255,255,255,0.03); }}")
+                           f"QPushButton#chip:hover {{ border-color: {color}; background: {T.rgba(color, 0.06)}; }}")
 
 
 # ---------------------------------------------------------------- family list
@@ -337,7 +343,7 @@ class FamilyDelegate(QStyledItemDelegate):
             bw = fm.horizontalAdvance(t) + 14
             br = QRect(x - bw, r.top() + 12, bw, 18)
             p.fillRect(br, QColor(T.GREEN))
-            p.setPen(QColor(T.BG))
+            p.setPen(QColor(T.ON_ACCENT))
             p.drawText(br, Qt.AlignCenter, t)
             x -= bw + 6
 
@@ -411,7 +417,7 @@ class HudDialog(QDialog):
                 b.setDefault(True)
             row.addWidget(b)
         lay.addLayout(row)
-        winapi.dark_title_bar(int(self.winId()), (10, 14, 21))
+        chrome(self)
 
     def _pick(self, t):
         self.result_key = t
@@ -471,7 +477,7 @@ class Inspector(QWidget):
         foot = QWidget()
         foot.setObjectName("foot")
         foot.setAttribute(Qt.WA_StyledBackground, True)
-        foot.setStyleSheet(f"QWidget#foot {{ background: rgba(10,14,21,0.94); border-top: 1px solid {T.LINE}; }}")
+        foot.setStyleSheet(f"QWidget#foot {{ background: {T.FOOT_BG}; border-top: 1px solid {T.LINE}; }}")
         flay = QVBoxLayout(foot)
         flay.setContentsMargins(18, 10, 18, 12)
         flay.setSpacing(8)
@@ -596,7 +602,7 @@ class Inspector(QWidget):
         elif not any(f.local_faces for f in fams):
             self.diag.setText(c("■ ADOBE FONTS ONLY. ", T.VIOLET) +
                               c("This font comes from Adobe Fonts and is managed by Creative Cloud, not installed "
-                                "in Windows. dl_font_fixer can't delete it, and Windows wouldn't either: Creative "
+                                f"in {OS_NAME}. dl_font_fixer can't delete it, and {OS_NAME} wouldn't either: Creative "
                                 "Cloud would just put it back. To remove it, open Creative Cloud › Fonts (or "
                                 "fonts.adobe.com › My Adobe Fonts) and deactivate it.", T.TEXT))
         else:
@@ -653,7 +659,7 @@ class Inspector(QWidget):
                     for col in range(4):
                         it.setForeground(col, QColor(T.FAINT)) if face.protected else None
                     reason = ("Adobe Fonts copy: manage it in the Creative Cloud app (Fonts tab)"
-                              if face.scope == "adobe" else "Windows system font: never removed")
+                              if face.scope == "adobe" else f"{OS_NAME} system font: never removed")
                     it.setToolTip(0, reason)
                 self.tree.addTopLevelItem(it)
         fm = QFontMetrics(mono(12))
@@ -736,7 +742,7 @@ class Inspector(QWidget):
     def _reveal(self, it, col=0):
         face = it.data(0, Qt.UserRole) if isinstance(it, QTreeWidgetItem) else it
         if face and face.scope != "adobe" and os.path.exists(face.path):
-            subprocess.Popen(["explorer.exe", "/select,", face.path])
+            winapi.reveal(face.path)
 
     def _open_folder(self):
         face = self._folder_face()
@@ -753,7 +759,7 @@ class Inspector(QWidget):
         if not face.purgeable:
             a.setEnabled(False)
             a.setText("Adobe Fonts: remove it in Creative Cloud" if face.scope == "adobe"
-                      else "Windows system font: protected")
+                      else f"{OS_NAME} system font: protected")
         m.addSeparator()
         a = m.addAction("Show file in folder", lambda: self._reveal(face))
         a.setEnabled(face.scope != "adobe" and face.exists)
@@ -793,7 +799,6 @@ class UpdateDialog(QDialog):
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(True)
         self.notes.setMinimumHeight(240)
-        self.notes.setStyleSheet(f"background: {T.BG}; border: 1px solid {T.LINE}; color: {T.TEXT}; padding: 8px;")
         lay.addWidget(self.notes, 1)
         self.auto = QCheckBox("Check for updates automatically (once a day)")
         self.auto.setChecked(self.settings.get("auto_update", True))
@@ -804,17 +809,18 @@ class UpdateDialog(QDialog):
         self.bar = QProgressBar()
         self.bar.setFixedHeight(6)
         self.bar.setTextVisible(False)
-        self.bar.setStyleSheet(f"QProgressBar {{ background: {T.LINE}; border: none; }} "
-                               f"QProgressBar::chunk {{ background: {T.CYAN}; }}")
         self._bar_idle()
         lay.addWidget(self.bar)
         row = QHBoxLayout()
         self.b_update = QPushButton("⬆  UPDATE NOW")
         self.b_update.setObjectName("primary")
         self.b_again = QPushButton("CHECK AGAIN")
+        self.b_hist = QPushButton("VERSION HISTORY")
+        self.b_hist.clicked.connect(self.toggle_history)
+        self._hist = False
         self.b_page = QPushButton("RELEASE PAGE")
         self.b_close = QPushButton("CLOSE")
-        for b in (self.b_update, self.b_again, self.b_page):
+        for b in (self.b_update, self.b_again, self.b_hist, self.b_page):
             b.setAutoDefault(False)
             row.addWidget(b)
         row.addStretch(1)
@@ -822,11 +828,12 @@ class UpdateDialog(QDialog):
         lay.addLayout(row)
         self.b_update.clicked.connect(self.start_update)
         self.b_again.clicked.connect(self.check)
-        self.b_page.clicked.connect(lambda: os.startfile((self.info or {}).get("page") or updater.RELEASES_PAGE))
+        self.b_page.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl((self.info or {}).get("page") or updater.RELEASES_PAGE)))
         self.b_close.clicked.connect(self.reject)
         self.b_close.setDefault(True)
         self.resize(680, 560)
-        winapi.dark_title_bar(int(self.winId()), (10, 14, 21))
+        chrome(self)
         if info:
             self._show(info)
         else:
@@ -877,8 +884,9 @@ class UpdateDialog(QDialog):
         self.b_again.setEnabled(True)
         ver = info["version"]
         self.sub.setText(f"Latest on GitHub: {ver}" + (f", released {info['date']}" if info.get("date") else ""))
-        notes = (info.get("notes") or "").strip() or "_No release notes._"
-        self.notes.setMarkdown(f"**What's new in {ver}:**\n\n{notes}")
+        self._hist = False
+        self.b_hist.setText("VERSION HISTORY")
+        self._latest_notes()
         if not updater.is_newer(ver):
             self._headline(f"You're on the latest version ({APP_VERSION}) ✔", T.GREEN)
             self.status.setText("Everything is up to date.")
@@ -895,6 +903,26 @@ class UpdateDialog(QDialog):
                                 f"installs {ver} and opens it again. Your history and settings are kept.")
         else:
             self.status.setText(f"{why} Use RELEASE PAGE to download it yourself.")
+
+    def _latest_notes(self):
+        info = self.info or {}
+        if not info:
+            self.notes.setMarkdown("")
+            return
+        notes = (info.get("notes") or "").strip() or "_No release notes._"
+        self.notes.setMarkdown(f"**What's new in {info['version']}:**\n\n{notes}")
+
+    def toggle_history(self):
+        """Switch the notes box between this release's notes and what changed in every version."""
+        from .changelog import HISTORY
+        self._hist = not self._hist
+        if self._hist:
+            self.notes.setMarkdown("**Version history: what changed in each version**\n\n" +
+                                   HISTORY.strip().replace("## ", "#### "))
+            self.b_hist.setText("LATEST NOTES")
+        else:
+            self.b_hist.setText("VERSION HISTORY")
+            self._latest_notes()
 
     def _failed(self, msg):
         self._bar_idle()
@@ -958,7 +986,7 @@ SCOPES = [("any", "ANYWHERE"), ("user", "INSTALLED FOR ME"), ("system", "ALL USE
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, carry=None):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} (v{APP_VERSION})")
         ic = asset("icon.png") or asset("icon.ico")
@@ -1026,23 +1054,26 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(bytes.fromhex(g))
         else:
             self.resize(1440, 900)
-        winapi.dark_title_bar(int(self.winId()), (5, 7, 11))
+        chrome(self)
 
         self.status_timer = QTimer(self, interval=4000, timeout=self.refresh_status)
         self.status_timer.start()
         self.log(f"{APP_NAME} v{APP_VERSION}  ·  {'ADMINISTRATOR' if self.admin else 'standard user'}", "info")
-        if not self.admin:
+        if IS_WIN and not self.admin:
             self.log("Windows' administrator prompt was declined: only fonts installed for you can be fixed. "
                      "Close and reopen dl_font_fixer and click Yes to fix everything.", "warn")
         QTimer.singleShot(150, self.refresh_status)
-        QTimer.singleShot(250, self.scan)
+        if carry:
+            self._carry_in(carry)
+        else:
+            QTimer.singleShot(250, self.scan)
         QTimer.singleShot(4000, self._auto_update_check)
 
     # ---- layout pieces
     def _build_header(self):
         w = QWidget()
         w.setFixedHeight(62)
-        w.setStyleSheet(f"background: rgba(10,14,21,0.92); border-bottom: 1px solid {T.LINE};")
+        w.setStyleSheet(f"background: {T.HEADER_BG}; border-bottom: 1px solid {T.LINE};")
         lay = QHBoxLayout(w)
         lay.setContentsMargins(18, 0, 14, 0)
         lay.setSpacing(10)
@@ -1053,7 +1084,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo)
         mode = (f'<span style="color:{T.GREEN}">ADMIN</span>' if self.admin else
                 f'<span style="color:{T.AMBER}">LIMITED (no admin)</span>')
-        ver = QLabel(f"v{APP_VERSION}  ·  SCAN / UNLOCK / PURGE  ·  {mode}")
+        ver = QLabel(f"v{APP_VERSION}  ·  SCAN / UNLOCK / PURGE" + (f"  ·  {mode}" if IS_WIN else ""))
         ver.setStyleSheet(f"font-family: {T.MONO}; font-size: 11px; color: {T.DIM}; border: none; "
                           f"background: transparent; padding-top: 4px;")
         lay.addWidget(ver)
@@ -1064,11 +1095,18 @@ class MainWindow(QMainWindow):
         self.chip_adobe.clicked.connect(self.restart_adobe)
         self.chip_reboot = Chip("REBOOT QUEUE")
         self.chip_reboot.clicked.connect(self.show_pending)
+        self.chip_theme = Chip("THEME")
+        self.chip_theme.clicked.connect(self._theme_menu)
+        label = {"dark": "◐  DARK", "light": "◑  LIGHT", "system": f"◐  MATCH {OS_NAME.upper()}"}[T.CHOICE]
+        self.chip_theme.setText(label)
+        self.chip_theme.setToolTip(f"Dark, light, or the same as {OS_NAME}")
+        self.chip_theme.setStyleSheet(f"QPushButton#chip {{ color: {T.TEXT}; }}")
         self.chip_update = Chip("UPDATES")
         self.chip_update.clicked.connect(lambda: self.check_updates(self._update_info))
         self.chip_update.set_state("CHECK FOR UPDATES", T.DIM, "See if a newer version of dl_font_fixer is available")
         self._update_info = None
-        for ch in (self.chip_cache, self.chip_adobe, self.chip_reboot, self.chip_update):
+        chips = (self.chip_cache, self.chip_adobe, self.chip_reboot) if IS_WIN else (self.chip_adobe,)
+        for ch in chips + (self.chip_update, self.chip_theme):
             lay.addWidget(ch)
         self.b_scan = QPushButton("⟳  RESCAN")
         self.b_scan.setObjectName("primary")
@@ -1089,6 +1127,8 @@ class MainWindow(QMainWindow):
                                 ("duplicate", "DUPLICATES", T.AMBER), ("orphan", "ORPHANS", T.BLUE),
                                 ("unreadable", "BROKEN", T.RED),
                                 ("recent", f"NEW · {scanner.RECENT_DAYS} DAYS", T.GREEN)):
+            if not IS_WIN and key in ("ghost", "orphan"):
+                continue
             t = StatTile(label, col, key)
             t.clicked.connect(lambda _=False, k=key: self.show_everything("all" if k == "faces" else k))
             lay.addWidget(t, 1)
@@ -1118,6 +1158,8 @@ class MainWindow(QMainWindow):
         head("// FILTER")
         self.nav_filter = {}
         for key, label in FILTERS:
+            if not IS_WIN and key in ("ghost", "orphan"):
+                continue
             b = QPushButton(label)
             b.setObjectName("nav")
             b.setCheckable(True)
@@ -1136,14 +1178,18 @@ class MainWindow(QMainWindow):
         head("// SYSTEM OPS")
         ops = [("✕  CLEAN ALL GHOSTS", self.clean_ghosts, "Remove every registry entry that points to a missing file"),
                ("▣  REBUILD FONT CACHE", self.rebuild_cache, "Stop FontCache, delete FNTCACHE.DAT and the cache "
-                                                             "files, start it again (admin)"),
+                                                             "files, start it again (admin)" if IS_WIN else
+                "Clear your Mac's font caches and restart the font server"),
                ("⟳  RESTART ADOBE CC", self.restart_adobe, "Close Creative Cloud / CoreSync / CCXProcess and start "
                                                           "Creative Cloud again so Adobe Fonts re-sync"),
                ("⟳  RESTART EXPLORER", self.restart_explorer, "Explorer keeps font files open for previews"),
                ("◷  REBOOT QUEUE", self.show_pending, "Files queued for deletion at the next restart"),
+               ][:None if IS_WIN else 3] + [
                ("☰  HISTORY", self.show_history, "Every font deleted with dl_font_fixer, and when"),
                ("⬆  CHECK FOR UPDATES", lambda: self.check_updates(self._update_info),
                 "See if a newer version of dl_font_fixer is available")]
+        if not IS_WIN:
+            ops = ops[1:]           # no ghosts without a font registry
         for text, fn, tip in ops:
             b = QPushButton(text)
             b.setObjectName("nav")
@@ -1221,11 +1267,11 @@ class MainWindow(QMainWindow):
         if not deletable:
             a.setEnabled(False)
             a.setText("Adobe Fonts only: remove it in Creative Cloud" if not local
-                      else "Windows system font: protected")
+                      else f"{OS_NAME} system font: protected")
         m.addSeparator()
         face = next((f for f in local if f.exists), None)
         a = m.addAction("Show file in folder",
-                        lambda: subprocess.Popen(["explorer.exe", "/select,", face.path]) if face else None)
+                        lambda: winapi.reveal(face.path) if face else None)
         a.setEnabled(face is not None)
         m.addAction("Copy family name", lambda: QGuiApplication.clipboard().setText(
             "\n".join(f.name for f in fams)))
@@ -1238,8 +1284,8 @@ class MainWindow(QMainWindow):
         faces = [f for fam in fams for f in fam.local_faces if f.purgeable]
         if not faces:
             if fams:
-                info(self, "Can't delete", "Nothing here can be deleted from Windows: Adobe Fonts are managed in "
-                     "the Creative Cloud app, and core Windows fonts are protected.")
+                info(self, "Can't delete", f"Nothing here can be deleted from {OS_NAME}: Adobe Fonts are managed "
+                     f"in the Creative Cloud app, and core {OS_NAME} fonts are protected.")
             return
         self.purge(faces, True)
 
@@ -1284,7 +1330,8 @@ class MainWindow(QMainWindow):
 
     # ---- scan
     def scan(self):
-        self.log("Scanning registry (HKLM + HKCU), C:\\Windows\\Fonts, your user Fonts folder and Adobe Fonts…",
+        self.log("Scanning registry (HKLM + HKCU), C:\\Windows\\Fonts, your user Fonts folder and Adobe Fonts…"
+                 if IS_WIN else "Scanning ~/Library/Fonts, /Library/Fonts, /System/Library/Fonts and Adobe Fonts…",
                  "info")
         t0 = time.time()
 
@@ -1292,6 +1339,7 @@ class MainWindow(QMainWindow):
             if not res:
                 return
             self.families, self.stats = res
+            self.last_scan = datetime.now()
             self.delegate.refresh_fonts()
             s = self.stats
             for k, t in self.tiles.items():
@@ -1312,6 +1360,72 @@ class MainWindow(QMainWindow):
             self.apply_filter()
 
         self.run_bg(scanner.scan, on_done=done, progress=True, label="SCANNING…", _wants_log=False)
+
+    # ---- theme
+    def _theme_menu(self):
+        m = QMenu(self)
+        for key, text in (("dark", "Dark"), ("light", "Light"), ("system", f"Match {OS_NAME}")):
+            m.addAction(("✓  " if T.CHOICE == key else "     ") + text, lambda k=key: self.set_theme(k))
+        m.exec(self.chip_theme.mapToGlobal(self.chip_theme.rect().bottomLeft()))
+
+    def set_theme(self, key):
+        if key == T.CHOICE:
+            return
+        if self.busy:
+            self.log("Wait for the current task to finish, then switch the theme", "warn")
+            return
+        st = load_settings()
+        st["theme"] = key
+        save_settings(st)
+        T.use(key)
+        QApplication.instance().setStyleSheet(T.QSS)
+        carry = {"families": self.families, "stats": self.stats, "filter": self.filter, "scope": self.scope,
+                 "search": self.search.text(), "selected": [f.key for f in self.selected_families()],
+                 "console": self.console.document().toHtml(), "update": self._update_info,
+                 "last_scan": getattr(self, "last_scan", None)}
+        self._save()
+        new = MainWindow(carry)
+        new.setGeometry(self.geometry())
+        if self.isMaximized():
+            new.showMaximized()
+        else:
+            new.show()
+        QApplication.instance().setProperty("main_window", new)
+        self.hide()
+        self.deleteLater()
+        new.log(f"Theme: {dict(dark='Dark', light='Light', system=f'Match {OS_NAME}')[key]}", "info")
+
+    def _carry_in(self, c):
+        """Take over the scan, filters and console of the window this one replaces (theme switch)."""
+        self.console.clear()
+        self.console.appendHtml(c["console"])
+        self.families, self.stats = c["families"], c["stats"]
+        self.last_scan = c.get("last_scan")
+        self._update_info = c.get("update")
+        if self._update_info:
+            self.chip_update.set_state(f"UPDATE {self._update_info['version']} AVAILABLE", T.GREEN,
+                                       "Click to see what's new and install it")
+        self.delegate.refresh_fonts()
+        for k, t in self.tiles.items():
+            v = self.stats.get("families" if k == "all" else k, 0)
+            t.value = t._shown = v
+        s = self.stats
+        if s:
+            when = f"{self.last_scan:%H:%M:%S}" if self.last_scan else "--:--"
+            self.bar.stop(f"LAST SCAN {when}  ·  {s['families']} FAMILIES  ·  "
+                          f"{sum(s[k] for k in ('ghost', 'orphan', 'unreadable')) + s['duplicate']} ISSUE FILES")
+        self.search.blockSignals(True)
+        self.search.setText(c.get("search", ""))
+        self.search.blockSignals(False)
+        self.scope = c.get("scope", "any")
+        for k, b in self.nav_scope.items():
+            b.setChecked(k == self.scope)
+        self.set_filter(c.get("filter", "all"))
+        keys = set(c.get("selected") or [])
+        sel = self.view.selectionModel()
+        for row, fam in enumerate(self.model.items):
+            if fam.key in keys:
+                sel.select(self.model.index(row), sel.SelectionFlag.Select)
 
     # ---- filtering
     def set_filter(self, key):
@@ -1383,7 +1497,7 @@ class MainWindow(QMainWindow):
             tip = ""
             if self.scope == "adobe" and self.filter not in ("all", "adobe"):
                 tip = ("<br><br>Adobe Fonts copies never have these problems: they live inside Creative Cloud, "
-                       "not in Windows.")
+                       f"not in {OS_NAME}.")
             self.empty_text.setText(f"<span style='color:{T.DIM};font-size:15px'>Nothing matches "
                                     f"{' + '.join(why)}.{tip}</span>")
             self.empty_btn.setVisible(narrowed)
@@ -1415,10 +1529,19 @@ class MainWindow(QMainWindow):
 
     # ---- status chips
     def refresh_status(self):
+        self._refresh_adobe_chip()
+        if not IS_WIN:
+            return
         cache = actions.service_state("FontCache")
         col = T.GREEN if cache == "running" else (T.AMBER if cache else T.DIM)
         self.chip_cache.set_state(f"FONTCACHE {str(cache or 'n/a').upper()}", col,
                                   "Windows Font Cache Service. Click to rebuild the font cache (admin).")
+        n = len(actions.pending_font_operations())
+        self.chip_reboot.set_state(f"REBOOT QUEUE {n}", T.AMBER if n else T.DIM,
+                                   f"{n} font file(s) will be deleted at the next restart" if n
+                                   else "Nothing queued for the next restart")
+
+    def _refresh_adobe_chip(self):
         a = actions.adobe_status()
         if a["running"]:
             tip = "Creative Cloud is running. Click to restart it (re-syncs Adobe Fonts)."
@@ -1428,10 +1551,6 @@ class MainWindow(QMainWindow):
                                       T.VIOLET, tip)
         else:
             self.chip_adobe.set_state("ADOBE CC OFF", T.DIM, "Creative Cloud is not running. Click to start it.")
-        n = len(actions.pending_font_operations())
-        self.chip_reboot.set_state(f"REBOOT QUEUE {n}", T.AMBER if n else T.DIM,
-                                   f"{n} font file(s) will be deleted at the next restart" if n
-                                   else "Nothing queued for the next restart")
 
     # ---- actions
     def purge(self, faces, unlock=True):
@@ -1447,7 +1566,10 @@ class MainWindow(QMainWindow):
                        f"{'' if f.exists else ' (missing)'}</td></tr>" for f in faces[:40])
         more = f"<br>… and {len(faces) - 40} more" if len(faces) > 40 else ""
         warn = ""
-        if need_admin and not self.admin:
+        if need_admin and IS_MAC:
+            warn += (f"<p style='color:{T.AMBER}'>{len(need_admin)} of these are in /Library/Fonts (all users): "
+                     f"macOS asks for your password.</p>")
+        elif need_admin and not self.admin:
             warn += (f"<p style='color:{T.AMBER}'>⚠ {len(need_admin)} of these are installed for all users. "
                      f"Without administrator rights only their per-user parts can be removed (reopen the app and "
                      f"click Yes on the Windows prompt).</p>")
@@ -1457,12 +1579,12 @@ class MainWindow(QMainWindow):
         if any("adobe" in fam.scopes for fam in self.families if fam.name in fams):
             warn += (f"<p style='color:{T.VIOLET}'>The Adobe Fonts copy is not touched: Creative Cloud keeps "
                      f"providing it.</p>")
-        html = (f"<p style='color:{T.RED}'><b>⚠ This deletes the font from Windows completely.</b></p>"
+        html = (f"<p style='color:{T.RED}'><b>⚠ This deletes the font from {OS_NAME} completely.</b></p>"
                 f"<p>Remove <b>{len(faces)}</b> font file(s) from <b>{len(fams)}</b> famil"
                 f"{'y' if len(fams) == 1 else 'ies'}: unload it, delete its registry entry and move its file to "
-                f"the Recycle Bin, unlocking the file if a program holds it.</p>"
+                f"the {BIN}, unlocking the file if a program holds it.</p>"
                 f"<table style='font-family:Consolas;font-size:12px'>{rows}</table>{more}{warn}"
-                f"<p style='color:{T.DIM}'>You can put it back from HISTORY until you empty the Recycle Bin. "
+                f"<p style='color:{T.DIM}'>You can put it back from HISTORY until you empty the {BIN}. "
                 f"After that it can't be recovered.</p>")
         if not ask(self, "Delete fonts", html, ok="DELETE", danger=True):
             return
@@ -1476,7 +1598,7 @@ class MainWindow(QMainWindow):
             msg = (f"<p>Deleted <b style='color:{T.GREEN}'>{len(res['deleted'])}</b> file(s), removed "
                    f"<b>{res['reg']}</b> registry entr{'y' if res['reg'] == 1 else 'ies'}.</p>")
             if nb:
-                msg += (f"<p style='color:{T.DIM}'>{nb} file(s) are in the Recycle Bin: HISTORY can put them back "
+                msg += (f"<p style='color:{T.DIM}'>{nb} file(s) are in the {BIN}: HISTORY can put them back "
                         f"until it's emptied.</p>")
             if res["renamed"] or res["queued"]:
                 msg += (f"<p style='color:{T.AMBER}'>{len(res['renamed'])} locked file(s) renamed to .old, "
@@ -1511,6 +1633,12 @@ class MainWindow(QMainWindow):
         self.purge(ghosts, False)
 
     def rebuild_cache(self):
+        if IS_MAC:
+            if ask(self, "Rebuild font cache", "Clear your Mac's font caches (atsutil) and restart the font "
+                   "server.<br><br>Fixes fonts that show the wrong weight, old versions, or don't show at all. "
+                   "Restart open apps afterwards, or log out and back in.", ok="REBUILD"):
+                self.run_bg(actions.rebuild_font_cache, label="REBUILDING FONT CACHE…")
+            return
         if not self.admin:
             info(self, "Rebuild font cache", "Rebuilding the Windows font cache needs administrator rights. "
                  "Close dl_font_fixer, open it again and click <b>Yes</b> on the Windows prompt.")
@@ -1557,7 +1685,7 @@ class MainWindow(QMainWindow):
             info(self, "History", "Nothing deleted yet. Every font you delete with dl_font_fixer is listed here "
                                   "(name, file, registry entry and when).")
             return
-        STATE = {"bin": ("in Recycle Bin  (recoverable)", T.GREEN),
+        STATE = {"bin": (f"in {BIN}  (recoverable)", T.GREEN),
                  "restored": ("restored", T.CYAN),
                  "gone": ("deleted  (can't recover)", T.DIM),
                  "registry": ("dead registry entry removed  (file was already missing)", T.DIM),
@@ -1571,7 +1699,7 @@ class MainWindow(QMainWindow):
         n_fonts = sum(len(e.get("items", [])) for e in entries)
         n_bin = sum(1 for e in entries for i in e.get("items", []) if i["state"] == "bin")
         h = QLabel(f"// HISTORY  ·  {n_fonts} font file(s) deleted, newest first  ·  {n_bin} still in the "
-                   f"Recycle Bin")
+                   f"{BIN}")
         h.setObjectName("h")
         lay.addWidget(h)
         tree = QTreeWidget()
@@ -1602,7 +1730,7 @@ class MainWindow(QMainWindow):
                 tip = [i.get("full_name") or "", i.get("path", "")]
                 tip += [f'{r[0]}  "{r[1]}" = {r[2]}' for r in i.get("reg", [])]
                 if i["state"] == "bin":
-                    tip.append("In the Recycle Bin: select it and click RESTORE to put it back")
+                    tip.append(f"In the {BIN}: select it and click RESTORE to put it back")
                 for col_ in range(4):
                     c_.setToolTip(col_, "\n".join(t for t in tip if t))
                 top.addChild(c_)
@@ -1612,7 +1740,7 @@ class MainWindow(QMainWindow):
         tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         lay.addWidget(tree, 1)
         row = QHBoxLayout()
-        b_restore = QPushButton("⟲  RESTORE FROM RECYCLE BIN")
+        b_restore = QPushButton(f"⟲  RESTORE FROM {BIN.upper()}")
         b_restore.setObjectName("primary")
         b_copy = QPushButton("COPY AS TEXT")
         b_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText("\n".join(text)))
@@ -1632,14 +1760,14 @@ class MainWindow(QMainWindow):
         def sel_changed():
             n = len(picked())
             b_restore.setEnabled(n > 0)
-            b_restore.setText(f"⟲  RESTORE {n} FROM RECYCLE BIN" if n else "⟲  RESTORE FROM RECYCLE BIN")
+            b_restore.setText(f"⟲  RESTORE {n} FROM {BIN.upper()}" if n else f"⟲  RESTORE FROM {BIN.upper()}")
 
         tree.itemSelectionChanged.connect(sel_changed)
         sel_changed()
 
         def restore():
             keys = picked()
-            if keys and ask(d, "Restore fonts", f"Put {len(keys)} font file(s) back from the Recycle Bin and "
+            if keys and ask(d, "Restore fonts", f"Put {len(keys)} font file(s) back from the {BIN} and "
                                                 f"install them again where they were?", ok="RESTORE"):
                 d.accept()
                 self.run_bg(actions.restore_from_bin, keys, label="RESTORING…", on_done=lambda _: self.scan())
@@ -1647,8 +1775,8 @@ class MainWindow(QMainWindow):
         b_restore.clicked.connect(restore)
 
         def clear():
-            if ask(d, "Clear history", "Forget the list of deleted fonts? Fonts still in the Recycle Bin stay there, "
-                                       "but you'd have to restore them from the Recycle Bin yourself.",
+            if ask(d, "Clear history", f"Forget the list of deleted fonts? Fonts still in the {BIN} stay there, "
+                                       f"but you'd have to restore them from the {BIN} yourself.",
                    ok="CLEAR", danger=True):
                 actions.clear_history()
                 self.log("History cleared", "info")
@@ -1663,7 +1791,7 @@ class MainWindow(QMainWindow):
         row.addStretch()
         row.addWidget(b_close)
         lay.addLayout(row)
-        winapi.dark_title_bar(int(d.winId()), (10, 14, 21))
+        chrome(d)
         d.exec()
 
     # ---- updates
@@ -1712,6 +1840,7 @@ def main(argv=None):
     app = QApplication(argv or [])
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    T.use(load_settings().get("theme", "dark"))
     app.setStyleSheet(T.QSS)
     try:
         import ctypes
@@ -1719,5 +1848,6 @@ def main(argv=None):
     except Exception:
         pass
     w = MainWindow()
+    app.setProperty("main_window", w)
     w.show()
     return app.exec()

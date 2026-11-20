@@ -9,17 +9,21 @@ import os
 import shutil
 import subprocess
 import time
-import winreg
 from datetime import datetime
 from pathlib import Path
 
 import psutil
 
 from . import winapi
-from .common import BACKUP_DIR, CONFIG_DIR, FONTS_KEY, HISTORY_FILE, USER_FONTS, WINDIR
+from .common import BACKUP_DIR, BIN, CONFIG_DIR, FONTS_KEY, HISTORY_FILE, IS_MAC, IS_WIN, USER_FONTS, WINDIR
+
+if IS_WIN:
+    import winreg
+    HIVES = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
+else:
+    HIVES = {}
 
 NO_WINDOW = winapi.NO_WINDOW
-HIVES = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
 
 ADOBE_SYNC = ["Creative Cloud.exe", "Creative Cloud Helper.exe", "Creative Cloud UI Helper.exe", "CoreSync.exe",
               "CCXProcess.exe", "CCLibrary.exe", "Adobe Desktop Service.exe", "AdobeIPCBroker.exe",
@@ -35,13 +39,23 @@ FNTCACHE = WINDIR / "System32" / "FNTCACHE.DAT"
 FONT_SERVICES = ["FontCache", "FontCache3.0.0.0"]
 PENDING_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager"
 
+if IS_MAC:
+    # process names on macOS (no .exe); Adobe apps carry the year: "Adobe Photoshop 2026"
+    ADOBE_SYNC = ["Creative Cloud", "Creative Cloud Helper", "Creative Cloud UI Helper", "Core Sync",
+                  "CoreSync", "CCXProcess", "CCLibrary", "Adobe Desktop Service", "AdobeIPCBroker",
+                  "Adobe CEF Helper", "Core Sync Helper"]
+    ADOBE_APPS = {"Adobe Photoshop": "Photoshop", "Adobe Illustrator": "Illustrator", "Adobe InDesign": "InDesign",
+                  "Adobe After Effects": "After Effects", "Adobe Premiere Pro": "Premiere Pro",
+                  "Adobe Acrobat": "Acrobat", "Adobe Media Encoder": "Media Encoder", "Adobe Animate": "Animate",
+                  "Adobe InCopy": "InCopy", "Adobe Audition": "Audition", "Adobe Express": "Express"}
+
 
 def _nolog(*a, **k):
     pass
 
 
 def run(cmd, log=_nolog, timeout=60):
-    log("> " + subprocess.list2cmdline(cmd), "cmd")
+    log("> " + " ".join(str(c) for c in cmd), "cmd")
     r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW, timeout=timeout,
                        errors="replace")
     return r.returncode, (r.stdout or "") + (r.stderr or "")
@@ -62,6 +76,8 @@ def procs_named(names):
 
 
 def service_state(name):
+    if not IS_WIN:
+        return None
     try:
         return psutil.win_service_get(name).status()   # running | stopped | start_pending ...
     except Exception:
@@ -97,6 +113,8 @@ _shell_tok = None
 
 def kill_explorer(log=_nolog):
     global _shell_tok
+    if not IS_WIN:
+        return False
     ps = procs_named(["explorer.exe"])
     if ps and _shell_tok is None:
         _shell_tok = winapi.shell_token()      # to start it again with normal (non-admin) rights
@@ -142,14 +160,30 @@ def kill_pid(pid, log=_nolog):
 
 # ---------------------------------------------------------------- Adobe
 
+def _adobe_apps_running():
+    if not IS_MAC:
+        return sorted({ADOBE_APPS[n] for n in ADOBE_APPS for p in procs_named([n])})
+    found = set()
+    for p in psutil.process_iter(["name"]):
+        name = p.info.get("name") or ""
+        for prefix, label in ADOBE_APPS.items():
+            if name.startswith(prefix):
+                found.add(label)
+    return sorted(found)
+
+
 def adobe_status():
     sync = procs_named(ADOBE_SYNC)
+    if IS_MAC:
+        return {"running": bool(sync), "processes": len(sync), "apps": _adobe_apps_running()}
     apps = sorted({ADOBE_APPS[n] for n in ADOBE_APPS for p in procs_named([n])})
     return {"running": bool(sync), "processes": len(sync), "apps": apps}
 
 
 def restart_adobe_cc(log=_nolog):
     """Close the Creative Cloud background processes and start Creative Cloud again, so it re-syncs fonts."""
+    if IS_MAC:
+        return _restart_adobe_cc_mac(log)
     exe = None
     for p in procs_named(["Creative Cloud.exe"]):
         try:
@@ -192,10 +226,43 @@ def restart_adobe_cc(log=_nolog):
         log("Creative Cloud is not installed in the usual place; start it from the Start menu.", "warn")
 
 
+def _restart_adobe_cc_mac(log):
+    ps = procs_named(ADOBE_SYNC)
+    log(f"Closing {len(ps)} Creative Cloud background process(es)", "info")
+    for p in ps:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    _gone, alive = psutil.wait_procs(ps, timeout=6)
+    for p in alive:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    time.sleep(1)
+    for cmd in (["open", "-b", "com.adobe.acc.AdobeCreativeCloud"], ["open", "-a", "Creative Cloud"]):
+        if subprocess.run(cmd, capture_output=True).returncode == 0:
+            log("Started Creative Cloud", "ok")
+            log("Creative Cloud re-syncs Adobe Fonts in about a minute. In Photoshop / Illustrator use "
+                "Type > Resolve Missing Fonts or reopen the document.", "info")
+            return
+    log("Creative Cloud isn't installed in the usual place; start it from Applications.", "warn")
+
+
 # ---------------------------------------------------------------- font cache
 
 def rebuild_font_cache(log=_nolog):
-    """Stop the font cache services, delete their cache files, start them again. Needs admin."""
+    """Stop the font cache services, delete their cache files, start them again. Needs admin on Windows."""
+    if IS_MAC:
+        # macOS: clear your font caches and restart the font server (no password needed)
+        for cmd in (["atsutil", "databases", "-removeUser"], ["atsutil", "server", "-shutdown"],
+                    ["atsutil", "server", "-ping"]):
+            rc, out = run(cmd, log)
+            if out.strip():
+                log(out.strip(), "info" if rc == 0 else "warn")
+        log("Font caches cleared. Restart open apps (or log out and in) so they pick up the change.", "ok")
+        return True
     if not winapi.is_admin():
         log("Rebuilding the font cache needs administrator rights", "err")
         return False
@@ -225,6 +292,8 @@ def rebuild_font_cache(log=_nolog):
 
 def pending_operations():
     """[(source, target)] from PendingFileRenameOperations; target '' means delete."""
+    if not IS_WIN:
+        return []
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, PENDING_KEY) as k:
             data, _ = winreg.QueryValueEx(k, "PendingFileRenameOperations")
@@ -332,15 +401,15 @@ def restore_from_bin(keys, log=_nolog):
                 log(f"{dst.name}: a file with that name is already there, skipped", "warn")
                 continue
             try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(item["bin"], dst)
+                winapi.move_back(item["bin"], str(dst))
             except OSError as ex:
-                log(f"{dst.name}: couldn't move it out of the Recycle Bin ({ex})", "err")
+                log(f"{dst.name}: couldn't move it out of the {BIN} ({ex})", "err")
                 continue
-            try:
-                os.remove(item["bin_info"])         # the Recycle Bin's own record of it
-            except OSError:
-                pass
+            if item.get("bin_info"):
+                try:
+                    os.remove(item["bin_info"])         # the Recycle Bin's own record of it
+                except OSError:
+                    pass
             for hive, name, data in item.get("reg", []):
                 if hive == "HKLM" and not admin:
                     log(f"HKLM \"{name}\" needs administrator rights, not restored", "warn")
@@ -358,7 +427,7 @@ def restore_from_bin(keys, log=_nolog):
     if n:
         _write_history(entries)
         winapi.broadcast_font_change()
-    log(f"Restored {n} font file(s) from the Recycle Bin", "ok" if n else "warn")
+    log(f"Restored {n} font file(s) from the {BIN}", "ok" if n else "warn")
     return n
 
 
@@ -444,13 +513,13 @@ def _remove(path, res, log):
         res["deleted"].append(path)
         if r:
             res["recycled"][path] = [r, i]
-            log(f"moved to Recycle Bin: {path}", "ok")
+            log(f"moved to {BIN}: {path}", "ok")
         else:
-            log(f"deleted {path} (the Recycle Bin didn't keep it)", "ok")
+            log(f"deleted {path} (the {BIN} didn't keep it)", "ok")
         return True
     if os.path.exists(path) and _try_delete(path):
         res["deleted"].append(path)
-        log(f"deleted {path} (Recycle Bin not available)", "ok")
+        log(f"deleted {path} ({BIN} not available)", "ok")
         return True
     return not os.path.exists(path)
 
@@ -468,7 +537,9 @@ def purge(faces, log=_nolog, unlock=True):
         log("Nothing to purge (Adobe Fonts and Windows system fonts are never touched)", "warn")
         return res
     need_admin = [f for f in faces if f.scope != "user" or any(h == "HKLM" for h, *_ in f.reg)]
-    if need_admin and not admin:
+    if need_admin and IS_MAC:
+        log(f"{len(need_admin)} face(s) are in /Library/Fonts (all users): macOS asks for your password", "info")
+    elif need_admin and not admin:
         log(f"{len(need_admin)} face(s) are installed for all users: they need administrator rights. "
             f"Reopen the app and click Yes on the administrator prompt.", "warn")
 
@@ -502,8 +573,9 @@ def purge(faces, log=_nolog, unlock=True):
             names = ", ".join(sorted({(x.get("service") or x.get("exe") or x["name"]) for x in lk}))
             log(f"{len(pending)} file(s) locked by: {names}", "warn")
         else:
-            log(f"{len(pending)} file(s) could not be deleted (locked by the Windows font system)", "warn")
-        if admin:
+            log(f"{len(pending)} file(s) could not be deleted "
+                f"({'locked by the Windows font system' if IS_WIN else 'password not given, or in use'})", "warn")
+        if admin and IS_WIN:
             services = {x["service"] for x in lk if x.get("service")} | {"FontCache"}
             for s in services:
                 if s in FONT_SERVICES and stop_service(s, log):

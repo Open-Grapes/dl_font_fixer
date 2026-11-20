@@ -18,13 +18,16 @@ import json
 import os
 import re
 import time
-import winreg
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .common import ADOBE_LIVETYPE, CONFIG_DIR, FONTS_KEY, SYSTEM_FONTS, USER_FONTS
+from .common import ADOBE_LIVETYPE, APPLE_FONTS, CONFIG_DIR, FONTS_KEY, IS_WIN, SYSTEM_FONTS, USER_FONTS
 
-FONT_EXT = {".ttf", ".otf", ".ttc", ".otc", ".fon", ".fnt"}
+if IS_WIN:
+    import winreg
+
+FONT_EXT = {".ttf", ".otf", ".ttc", ".otc", ".fon", ".fnt", ".dfont"}
+OPAQUE_EXT = {".fon", ".fnt", ".dfont"}     # real fonts fontTools can't read the names of
 ISSUE_ORDER = ["ghost", "adobe", "duplicate", "orphan", "unreadable"]
 RECENT_DAYS = 14
 SEEN_FILE = CONFIG_DIR / "seen.json"        # font -> when dl_font_fixer first saw it (for "recently added")
@@ -55,7 +58,7 @@ class Face:
     id: int
     path: str = ""                 # full path ("" for nothing)
     exists: bool = True
-    scope: str = "user"            # user | system | adobe | other
+    scope: str = "user"            # user | system | adobe | apple (macOS's own) | other
     reg: list = field(default_factory=list)   # [(hive 'HKCU'|'HKLM', value name, raw data)]
     family: str = ""
     style: str = ""
@@ -133,7 +136,7 @@ def read_names(path):
     """(family, style, full, postscript, version, variable) from the font's name table, or None."""
     from fontTools.ttLib import TTFont, TTCollection
     ext = Path(path).suffix.lower()
-    if ext in (".fon", ".fnt"):
+    if ext in OPAQUE_EXT:
         return None
     try:
         if ext in (".ttc", ".otc"):
@@ -169,8 +172,10 @@ def guess_from_reg_name(value_name):
 # ---------------------------------------------------------------- registry
 
 def read_registry():
-    """[(hive, value name, data)] for HKLM and HKCU font keys."""
+    """[(hive, value name, data)] for HKLM and HKCU font keys (Windows; a Mac has no font registry)."""
     out = []
+    if not IS_WIN:
+        return out
     for hive_name, hive in (("HKLM", winreg.HKEY_LOCAL_MACHINE), ("HKCU", winreg.HKEY_CURRENT_USER)):
         try:
             with winreg.OpenKey(hive, FONTS_KEY) as k:
@@ -205,19 +210,34 @@ def scope_of(path):
         return "system"
     if p.startswith(str(ADOBE_LIVETYPE).lower()):
         return "adobe"
+    if any(p.startswith(str(a).lower()) for a in APPLE_FONTS):
+        return "apple"
     return "other"
 
 
 # ---------------------------------------------------------------- the scan
 
 def adobe_files():
-    """Font files activated by Adobe Fonts (no extensions, numeric names, under livetype\\r)."""
+    """Font files activated by Adobe Fonts (no extensions, numeric names, under livetype\\r; .r on a Mac)."""
     out = []
-    base = ADOBE_LIVETYPE / "r"
-    if base.is_dir():
-        for p in base.iterdir():
-            if p.is_file() and p.stat().st_size > 1024:
-                out.append(p)
+    for base in (ADOBE_LIVETYPE / "r", ADOBE_LIVETYPE / ".r"):
+        if base.is_dir():
+            for p in base.iterdir():
+                if p.is_file() and p.stat().st_size > 1024:
+                    out.append(p)
+    return out
+
+
+def _font_files(folder):
+    """Font files in a Fonts folder. Windows: just that folder. Mac: subfolders too (they're allowed there)."""
+    if IS_WIN:
+        try:
+            return [e.path for e in os.scandir(folder) if e.is_file()]
+        except OSError:
+            return []
+    out = []
+    for root, _dirs, files in os.walk(folder):
+        out += [os.path.join(root, f) for f in files]
     return out
 
 
@@ -239,18 +259,15 @@ def scan(progress=None, include_adobe=True):
         f = faces.get(key) or new_face(p, scope_of(p))
         f.reg.append((hive, name, data))
 
-    for folder, scope in ((SYSTEM_FONTS, "system"), (USER_FONTS, "user")):
-        try:
-            entries = list(os.scandir(folder))
-        except OSError:
-            entries = []
-        for e in entries:
-            ext = Path(e.name).suffix.lower()
-            if not e.is_file() or ext not in FONT_EXT or e.path.lower() in faces:
+    folders = [(SYSTEM_FONTS, "system"), (USER_FONTS, "user")] + [(a, "apple") for a in APPLE_FONTS]
+    for folder, scope in folders:
+        for path in _font_files(folder):
+            ext = Path(path).suffix.lower()
+            if ext not in FONT_EXT or path.lower() in faces:
                 continue
-            if scope == "system" and ext in (".fon", ".fnt"):
+            if IS_WIN and scope == "system" and ext in (".fon", ".fnt"):
                 continue    # Windows ships dozens of unregistered legacy bitmap fonts: not a problem, just noise
-            new_face(e.path, scope)
+            new_face(path, scope)
 
     for p in (adobe_files() if include_adobe else []):
         new_face(p, "adobe")
@@ -273,13 +290,13 @@ def scan(progress=None, include_adobe=True):
                 f.family, f.style = guess_from_reg_name(f.reg[0][1])
             else:
                 f.family, f.style = guess_from_reg_name(Path(f.path).stem.replace("-", " ").replace("_", " "))
-            if f.exists and Path(f.path).suffix.lower() not in (".fon", ".fnt"):
+            if f.exists and Path(f.path).suffix.lower() not in OPAQUE_EXT:
                 f.issues.add("unreadable")
         if not f.full_name:
             f.full_name = f"{f.family} {f.style}".strip()
         if not f.exists:
             f.issues.add("ghost")
-        if f.exists and not f.reg and f.scope in ("user", "system"):
+        if IS_WIN and f.exists and not f.reg and f.scope in ("user", "system"):
             # Windows ships many unregistered legacy bitmap fonts (.fon) and a hidden Marlett: not a problem
             legacy = Path(f.path).suffix.lower() in (".fon", ".fnt")
             if f.scope == "user" or not (legacy or f.protected):
@@ -300,7 +317,7 @@ def scan(progress=None, include_adobe=True):
         by_ps.setdefault(k, []).append(f)
     for group in by_ps.values():
         if len({g.path.lower() for g in group}) > 1:
-            group.sort(key=lambda g: (not g.reg, g.scope != "system", len(Path(g.path).name), g.path.lower()))
+            group.sort(key=lambda g: (g.scope != "apple", not g.reg, g.scope != "system", len(Path(g.path).name), g.path.lower()))
             for i, g in enumerate(group):
                 g.issues.add("duplicate")
                 g.extra = i > 0
@@ -386,7 +403,7 @@ def _mark_added(items):
             t = seen[k]
         elif f.scope == "adobe":
             t = 0.0 if first_run else now
-        elif first_run and f.scope == "system" and not f.reg:
+        elif f.scope == "apple" or (first_run and f.scope == "system" and not f.reg):
             t = 0.0
         elif first_run and f.scope == "system" and (f.protected or _birth(f.path) and
                                                     abs(_birth(f.path) - _windows_fonts_birth()) < 3600):

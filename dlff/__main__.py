@@ -48,7 +48,7 @@ def main():
     # The app always runs as administrator: fonts for all users, the font cache and the reboot queue need it.
     # If the Windows prompt is declined it still opens, limited to fonts installed for the current user.
     from . import winapi
-    if "--no-elevate" not in args and not winapi.is_admin():
+    if winapi.IS_WIN and "--no-elevate" not in args and not winapi.is_admin():
         if winapi.relaunch_as_admin(["--no-elevate"]):
             return 0
     from .gui import main as gui_main
