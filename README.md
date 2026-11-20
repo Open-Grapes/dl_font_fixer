@@ -4,12 +4,36 @@ A Windows and Mac tool for fonts that won't go away. It finds **ghost registry e
 installs** and **Adobe Fonts conflicts**, tells you which program is **locking** a font file, and **purges** fonts
 completely (registry + file), even when Windows says the file is in use. No CMD, no Safe Mode.
 
+![dl_font_fixer demo: browse fonts, filter duplicates and Adobe conflicts, search, inspect a family, light mode](docs/demo.gif)
+
 **Download:** see [Releases](../../releases).
 
 - **Windows:** `dl_font_fixer-windows.zip`, unzip it and run `dl_font_fixer.exe`.
 - **Mac:** `dl_font_fixer-mac-apple-silicon.dmg` (M1 and later) or `dl_font_fixer-mac-intel.dmg`. Drag the app to
   Applications. The first time, macOS blocks it because it isn't notarized: System Settings › Privacy & Security ›
   **Open Anyway**.
+
+## Screenshots
+
+**An Adobe Fonts conflict:** a font installed by hand that's also activated in Creative Cloud. The inspector explains
+the problem, ticks your installed copy for deletion and leaves the Adobe copy alone.
+
+![Adobe Fonts conflict in the inspector](docs/adobe_conflict.png)
+
+**Duplicates:** the same family installed for you and for all users. One copy of each face is kept, the extras are ticked.
+
+![Duplicate install of Montserrat](docs/family_inspector.png)
+
+**Light mode** (THEME in the top bar: Dark, Light or Match Windows / macOS).
+
+![Light mode](docs/main_light.png)
+
+<table>
+<tr>
+<td width="50%"><b>Update check at launch</b>: shown only when a newer version exists.<br><br><img src="docs/update_prompt.png" alt="Update available: UPDATE NOW or LATER"></td>
+<td width="50%"><b>Version history</b>: what changed in every version.<br><br><img src="docs/version_history.png" alt="Version history"></td>
+</tr>
+</table>
 
 ## On a Mac
 
@@ -73,8 +97,9 @@ only your installed copy. Core Windows fonts like Segoe UI or Arial are protecte
 - **History**: every font deleted with dl_font_fixer: name, file, registry entry and when, marked
   *in Recycle Bin (recoverable)* or *deleted (can't recover)* once the Recycle Bin is emptied. **Restore** puts a
   recoverable font back where it was, registry entry included.
-- **Check for updates**: asks GitHub for the latest version and installs it in place (also checked once a day;
-  the top bar shows UPDATE … AVAILABLE). **Version history** shows what changed in every version.
+- **Check for updates**: asks GitHub for the latest version and installs it in place. Every time the app opens it
+  checks quietly: nothing is shown when you're up to date or offline; when a newer version exists, a window offers
+  **UPDATE NOW** or **LATER**. **Version history** shows what changed in every version.
 - **Theme**: Dark, Light or Match Windows (THEME in the top bar), switches straight away.
 
 The app asks Windows for administrator rights when it starts (fonts for all users, the font cache and the reboot
