@@ -32,7 +32,7 @@ def main():
     src = next(p for p in Path("/System/Library/Fonts").rglob("*.ttf"))
     USER_FONTS.mkdir(parents=True, exist_ok=True)
     dst = USER_FONTS / "DLFF_CI_Test.ttf"
-    shutil.copy2(src, dst)
+    shutil.copyfile(src, dst)          # contents only: system fonts carry a "restricted" flag
     try:
         fams, stats = scanner.scan()
         print("scan:", stats, flush=True)
