@@ -29,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Mac tests (throwaway font: scan, Trash, History, restore)
+      - name: "Mac tests (throwaway font: scan, Trash, History, restore)"
         run: python tests/test_mac.py
 
       - name: Build, smoke-test and package
