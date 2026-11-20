@@ -2,6 +2,10 @@
 Add a section here with every new version."""
 
 HISTORY = """
+## 1.4  (20 Nov 2026)
+- **Update check at every launch** (Windows and Mac): the app quietly asks GitHub for the latest version. If you're up to date, or offline, nothing is shown. If there's a newer version, a window shows what's new with **UPDATE NOW** or **LATER**
+- **Easier to read** release notes and version history: more space between lines, bullets and sections
+
 ## 1.3  (20 Nov 2026)
 - New **Mac version** (Apple Silicon and Intel, macOS 13+): scans ~/Library/Fonts, /Library/Fonts, macOS's own fonts and Adobe Fonts; Adobe conflicts, duplicates, broken files and recently added; deletes go to the Trash and HISTORY can put them back; rebuild font cache and restart Creative Cloud
 - **Light mode**: THEME in the top bar switches between Dark, Light and Match Windows straight away; your choice is remembered

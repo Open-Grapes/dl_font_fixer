@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "dl_font_fixer"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 RELEASE_ASSET = f"{APP_NAME}-windows.zip"     # the Mac files are named by updater.asset_name()
 
 FROZEN = getattr(sys, "frozen", False)

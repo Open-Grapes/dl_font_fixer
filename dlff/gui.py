@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import (QUrl, QAbstractListModel, QEasingCurve, QModelIndex, QRect, QRectF, QSize, Qt, QThread,
                             QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QDesktopServices, QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon, QPainter,
-                           QPen)
+                           QPen, QTextBlockFormat, QTextCursor)
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QDialog, QFrame,
                                QProgressBar, QTextBrowser,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView, QMainWindow, QMenu,
@@ -775,10 +775,80 @@ class Inspector(QWidget):
 
 # ---------------------------------------------------------------- updates
 
+_LAUNCH_CHECKED = False       # the launch check runs once per start, not again when the theme rebuilds the window
+
+
+def set_notes(view, md):
+    """Show markdown in a QTextBrowser with room to breathe: taller lines, space between bullets and sections."""
+    view.setMarkdown(md)
+    doc = view.document()
+    doc.setDocumentMargin(14)
+    cur = QTextCursor(doc)
+    b = doc.begin()
+    while b.isValid():
+        fmt = QTextBlockFormat(b.blockFormat())
+        fmt.setLineHeight(150, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        if b.textList() is not None:
+            fmt.setBottomMargin(10)
+        elif b.blockFormat().headingLevel() or (b.text().strip() and b.next().isValid()
+                                                 and b.next().textList() is not None):
+            fmt.setTopMargin(16 if b.position() else 0)
+            fmt.setBottomMargin(8)
+        else:
+            fmt.setBottomMargin(12)
+        cur.setPosition(b.position())
+        cur.setBlockFormat(fmt)
+        b = b.next()
+
+
+class UpdatePrompt(QDialog):
+    """Shown at launch only when GitHub has a newer version: what's new, UPDATE NOW or LATER."""
+
+    def __init__(self, parent, info):
+        super().__init__(parent)
+        self.setWindowTitle("Update available")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        h = QLabel("// UPDATE AVAILABLE")
+        h.setObjectName("h")
+        lay.addWidget(h)
+        head = QLabel(f"{APP_NAME} {info['version']} is available")
+        head.setStyleSheet(f"font-size: 19px; color: {T.CYAN};")
+        lay.addWidget(head)
+        sub = QLabel(f"You have {APP_VERSION}." + (f" Released {info['date']}." if info.get("date") else ""))
+        sub.setStyleSheet(f"color: {T.DIM};")
+        lay.addWidget(sub)
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        set_notes(notes, f"**What's new in {info['version']}:**\n\n" +
+                  ((info.get("notes") or "").strip() or "_No release notes._"))
+        lay.addWidget(notes, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        later = QPushButton("LATER")
+        later.setAutoDefault(False)
+        later.clicked.connect(self.reject)
+        upd = QPushButton("⬆  UPDATE NOW")
+        upd.setObjectName("primary")
+        upd.setDefault(True)
+        upd.clicked.connect(self.accept)
+        row.addWidget(later)
+        row.addWidget(upd)
+        lay.addLayout(row)
+        self.resize(620, 520)
+        chrome(self)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(T.PANEL))
+        brackets(p, self.rect().adjusted(6, 6, -7, -7), T.CYAN, 12)
+
+
 class UpdateDialog(QDialog):
     """Check for updates: this version, the latest on GitHub, what's new, Update now / Check again / Release page."""
 
-    def __init__(self, parent, info=None):
+    def __init__(self, parent, info=None, start=False):
         super().__init__(parent)
         self.setWindowTitle("Check for updates")
         self.info, self.worker = info, None
@@ -800,7 +870,7 @@ class UpdateDialog(QDialog):
         self.notes.setOpenExternalLinks(True)
         self.notes.setMinimumHeight(240)
         lay.addWidget(self.notes, 1)
-        self.auto = QCheckBox("Check for updates automatically (once a day)")
+        self.auto = QCheckBox("Check for updates when the app starts")
         self.auto.setChecked(self.settings.get("auto_update", True))
         lay.addWidget(self.auto)
         self.status = QLabel()
@@ -836,6 +906,8 @@ class UpdateDialog(QDialog):
         chrome(self)
         if info:
             self._show(info)
+            if start and self.b_update.isEnabled():
+                QTimer.singleShot(0, self.start_update)
         else:
             self.check()
 
@@ -910,15 +982,15 @@ class UpdateDialog(QDialog):
             self.notes.setMarkdown("")
             return
         notes = (info.get("notes") or "").strip() or "_No release notes._"
-        self.notes.setMarkdown(f"**What's new in {info['version']}:**\n\n{notes}")
+        set_notes(self.notes, f"**What's new in {info['version']}:**\n\n{notes}")
 
     def toggle_history(self):
         """Switch the notes box between this release's notes and what changed in every version."""
         from .changelog import HISTORY
         self._hist = not self._hist
         if self._hist:
-            self.notes.setMarkdown("**Version history: what changed in each version**\n\n" +
-                                   HISTORY.strip().replace("## ", "#### "))
+            set_notes(self.notes, "**Version history: what changed in each version**\n\n" +
+                      HISTORY.strip().replace("## ", "#### "))
             self.b_hist.setText("LATEST NOTES")
         else:
             self.b_hist.setText("VERSION HISTORY")
@@ -1795,15 +1867,17 @@ class MainWindow(QMainWindow):
         d.exec()
 
     # ---- updates
-    def check_updates(self, info=None):
-        UpdateDialog(self, info if isinstance(info, dict) else None).exec()
+    def check_updates(self, info=None, start=False):
+        UpdateDialog(self, info if isinstance(info, dict) else None, start=start).exec()
 
     def _auto_update_check(self):
-        """Quietly check once a day; if there's a newer version, the UPDATES chip lights up."""
-        st = load_settings()
-        if not st.get("auto_update", True) or not updater.app_location():
+        """Every launch, quietly ask GitHub for the latest version. Nothing is shown when this is the latest
+        version or there's no internet; when a newer one exists, ask UPDATE NOW or LATER."""
+        global _LAUNCH_CHECKED
+        if _LAUNCH_CHECKED:
             return
-        if time.time() - float(st.get("last_update_check", 0)) < 24 * 3600:
+        _LAUNCH_CHECKED = True
+        if not load_settings().get("auto_update", True) or not updater.app_location():
             return
         w = Worker(updater.latest, _wants_log=False)
 
@@ -1811,13 +1885,16 @@ class MainWindow(QMainWindow):
             st = load_settings()
             st["last_update_check"] = time.time()
             save_settings(st)
-            if info and updater.is_newer(info["version"]):
-                self._update_info = info
-                self.chip_update.set_state(f"UPDATE {info['version']} AVAILABLE", T.GREEN,
-                                           "Click to see what's new and install it")
-                self.log(f"dl_font_fixer {info['version']} is available: click UPDATE in the top bar", "ok")
+            if not (info and updater.is_newer(info["version"])):
+                return
+            self._update_info = info
+            self.chip_update.set_state(f"UPDATE {info['version']} AVAILABLE", T.GREEN,
+                                       "Click to see what's new and install it")
+            self.log(f"dl_font_fixer {info['version']} is available", "ok")
+            if self.isVisible() and UpdatePrompt(self, info).exec() == QDialog.DialogCode.Accepted:
+                self.check_updates(info, start=True)
 
-        w.done.connect(done)
+        w.done.connect(done)            # failures (offline, GitHub down) are ignored: no message
         w.finished.connect(lambda: self.workers.discard(w))
         self.workers.add(w)
         w.start()
