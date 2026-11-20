@@ -28,6 +28,10 @@ Fonts are grouped by family (every weight, italic and variable file under one ca
 | **DUPLICATE** | The same font is installed more than once (for you *and* for all users, or two files) |
 | **ORPHAN** | A font file sits in a Fonts folder but nothing registers it |
 | **BROKEN** | The file isn't a readable font |
+| **NEW** | Installed in the last 14 days (filter: *Recently added*) |
+
+*Recently added* uses the date you installed the font. dl_font_fixer remembers which fonts it has seen, so
+Windows Update rewriting its own fonts or Creative Cloud re-syncing Adobe Fonts doesn't count as new.
 
 The inspector explains each problem in plain words and ticks the faces that should go (for duplicates one
 copy is kept). **Right-click a family** (or press **Delete**) to remove the whole font from Windows; a warning
@@ -40,11 +44,10 @@ only your installed copy. Core Windows fonts like Segoe UI or Arial are protecte
 
 ## Purge: what happens
 
-1. Every file is **backed up** to `%APPDATA%\dl_font_fixer\backups` (restore with *Backups / Restore*).
-2. The font is unloaded from the session (`RemoveFontResource`) and its `HKCU`/`HKLM` registry values are deleted.
-3. The file is deleted. If it's locked, the **Restart Manager** finds who holds it, the app stops the Font Cache
+1. The font is unloaded from the session (`RemoveFontResource`) and its `HKCU`/`HKLM` registry values are deleted.
+2. The file goes to the **Recycle Bin**. If it's locked, the **Restart Manager** finds who holds it, the app stops the Font Cache
    service and restarts Explorer if needed, then tries again (programs holding it are listed in the console).
-4. Still locked? It's renamed to `.old` and, as administrator, queued for deletion at the next restart
+3. Still locked? It's renamed to `.old` and, as administrator, queued for deletion at the next restart
    (`PendingFileRenameOperations`). Windows no longer loads it either way.
 
 ## System ops
@@ -54,6 +57,11 @@ only your installed copy. Core Windows fonts like Segoe UI or Arial are protecte
 - **Restart Adobe CC**: closes Creative Cloud, CoreSync and CCXProcess and starts Creative Cloud again.
 - **Restart Explorer**: Explorer keeps font files open for previews.
 - **Reboot queue**: font files waiting to be deleted at the next restart.
+- **History**: every font deleted with dl_font_fixer: name, file, registry entry and when, marked
+  *in Recycle Bin (recoverable)* or *deleted (can't recover)* once the Recycle Bin is emptied. **Restore** puts a
+  recoverable font back where it was, registry entry included.
+- **Check for updates**: asks GitHub for the latest version and installs it in place (also checked once a day;
+  the top bar shows UPDATE … AVAILABLE).
 
 The app asks Windows for administrator rights when it starts (fonts for all users, the font cache and the reboot
 queue need them); click **Yes**. If you click No it still opens, limited to fonts installed for your user.
@@ -68,6 +76,7 @@ py -3.13 -m venv .venv
 .venv\Scripts\python build.py        # -> dist\Windows\dl_font_fixer-windows.zip
 ```
 
-`dl_font_fixer.exe --scan-report FILE` writes a JSON report of everything found without changing anything.
+`dl_font_fixer.exe --scan-report FILE` writes a JSON report of everything found without changing anything;
+`--check-update FILE` writes what GitHub reports as the latest version.
 
 PySide6 (LGPL), fontTools (MIT) and psutil (BSD) are used under their licenses.

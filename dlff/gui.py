@@ -11,13 +11,14 @@ from PySide6.QtCore import (QAbstractListModel, QEasingCurve, QModelIndex, QRect
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QIcon, QPainter,
                            QPen)
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QDialog, QFrame,
+                               QProgressBar, QTextBrowser,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView, QMainWindow, QMenu,
                                QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStyle, QStyledItemDelegate,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import actions, scanner, winapi
+from . import actions, scanner, updater, winapi
 from . import theme as T
-from .common import APP_NAME, APP_VERSION, BACKUP_DIR, asset, human_size, load_settings, save_settings
+from .common import APP_NAME, APP_VERSION, asset, human_size, load_settings, save_settings
 
 EXPLAIN = {
     "ghost": ("GHOST ENTRY",
@@ -41,6 +42,18 @@ EXPLAIN = {
                    "The file is in the Fonts folder but isn't a readable font (damaged or wrong format).",
                    "Delete removes it."),
 }
+
+
+def ago(ts):
+    """'today', 'yesterday', '3 days ago', or a date."""
+    days = int((time.time() - ts) // 86400)
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 30:
+        return f"{days} days ago"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 def mono(px, bold=False):
@@ -319,6 +332,14 @@ class FamilyDelegate(QStyledItemDelegate):
             p.setPen(QPen(qcolor(T.GREEN, 160), 1))
             p.drawText(br, Qt.AlignCenter, t)
             x -= 36
+        if fam.recent:
+            t = "NEW"
+            bw = fm.horizontalAdvance(t) + 14
+            br = QRect(x - bw, r.top() + 12, bw, 18)
+            p.fillRect(br, QColor(T.GREEN))
+            p.setPen(QColor(T.BG))
+            p.drawText(br, Qt.AlignCenter, t)
+            x -= bw + 6
 
         # family name in its own font
         has = fam.name.lower() in self.available
@@ -342,6 +363,8 @@ class FamilyDelegate(QStyledItemDelegate):
             meta += "  ·  ADOBE FONTS"
         if fam.size:
             meta += f"  ·  {human_size(fam.size)}"
+        if fam.recent:
+            meta += f"  ·  ADDED {ago(fam.added).upper()}"
         if any(f.variable for f in fam.faces):
             meta += "  ·  VARIABLE"
         p.setFont(mono(11))
@@ -592,6 +615,8 @@ class Inspector(QWidget):
                     st.append("PROTECTED")
                 if face.extra:
                     st.append("EXTRA COPY")
+                if face.recent:
+                    st.insert(0, "NEW")
                 style = f"{fam.name} · {face.style}" if multi else (face.style or "—")
                 where = face.scope.upper() + ("".join(f" {h}" for h, *_ in face.reg[:1]))
                 fn = Path(face.path).name if face.scope != "adobe" else "livetype\\r\\" + Path(face.path).name
@@ -604,6 +629,8 @@ class Inspector(QWidget):
                     tip.append(f"{h}  \"{n}\" = {d}")
                 if face.version:
                     tip.append(face.version)
+                if face.added:
+                    tip.append("Installed " + datetime.fromtimestamp(face.added).strftime("%Y-%m-%d %H:%M"))
                 if face.note:
                     tip.append(face.note)
                 for col in range(4):
@@ -740,10 +767,192 @@ class Inspector(QWidget):
         m.exec(self.tree.viewport().mapToGlobal(pos))
 
 
+# ---------------------------------------------------------------- updates
+
+class UpdateDialog(QDialog):
+    """Check for updates: this version, the latest on GitHub, what's new, Update now / Check again / Release page."""
+
+    def __init__(self, parent, info=None):
+        super().__init__(parent)
+        self.setWindowTitle("Check for updates")
+        self.info, self.worker = info, None
+        self.settings = load_settings()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(8)
+        h = QLabel(f"// UPDATES  ·  {APP_NAME} v{APP_VERSION} (this version)")
+        h.setObjectName("h")
+        lay.addWidget(h)
+        self.head = QLabel()
+        self.head.setWordWrap(True)
+        lay.addWidget(self.head)
+        self.sub = QLabel()
+        self.sub.setWordWrap(True)
+        self.sub.setStyleSheet(f"color: {T.DIM};")
+        lay.addWidget(self.sub)
+        self.notes = QTextBrowser()
+        self.notes.setOpenExternalLinks(True)
+        self.notes.setMinimumHeight(240)
+        self.notes.setStyleSheet(f"background: {T.BG}; border: 1px solid {T.LINE}; color: {T.TEXT}; padding: 8px;")
+        lay.addWidget(self.notes, 1)
+        self.auto = QCheckBox("Check for updates automatically (once a day)")
+        self.auto.setChecked(self.settings.get("auto_update", True))
+        lay.addWidget(self.auto)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setFixedHeight(6)
+        self.bar.setTextVisible(False)
+        self.bar.setStyleSheet(f"QProgressBar {{ background: {T.LINE}; border: none; }} "
+                               f"QProgressBar::chunk {{ background: {T.CYAN}; }}")
+        self._bar_idle()
+        lay.addWidget(self.bar)
+        row = QHBoxLayout()
+        self.b_update = QPushButton("⬆  UPDATE NOW")
+        self.b_update.setObjectName("primary")
+        self.b_again = QPushButton("CHECK AGAIN")
+        self.b_page = QPushButton("RELEASE PAGE")
+        self.b_close = QPushButton("CLOSE")
+        for b in (self.b_update, self.b_again, self.b_page):
+            b.setAutoDefault(False)
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(self.b_close)
+        lay.addLayout(row)
+        self.b_update.clicked.connect(self.start_update)
+        self.b_again.clicked.connect(self.check)
+        self.b_page.clicked.connect(lambda: os.startfile((self.info or {}).get("page") or updater.RELEASES_PAGE))
+        self.b_close.clicked.connect(self.reject)
+        self.b_close.setDefault(True)
+        self.resize(680, 560)
+        winapi.dark_title_bar(int(self.winId()), (10, 14, 21))
+        if info:
+            self._show(info)
+        else:
+            self.check()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(T.PANEL))
+        brackets(p, self.rect().adjusted(6, 6, -7, -7), T.CYAN, 12)
+
+    def done(self, r):
+        self.settings = {**load_settings(), "auto_update": self.auto.isChecked(),
+                         "last_update_check": self.settings.get("last_update_check", 0)}
+        save_settings(self.settings)
+        super().done(r)
+
+    def _bar_idle(self, value=0):
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(value)
+
+    def _headline(self, text, color=T.TEXT):
+        self.head.setStyleSheet(f"font-size: 19px; color: {color};")
+        self.head.setText(text)
+
+    def _run(self, fn, on_done, on_fail, progress=False):
+        self.worker = Worker(fn, _wants_log=False, _wants_progress=progress)
+        self.worker.done.connect(on_done)
+        self.worker.failed.connect(on_fail)
+        if progress:
+            self.worker.progress.connect(lambda a, b, _t: self._progress(a, b))
+        self.worker.start()
+
+    def check(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self._headline("Checking for updates…", T.CYAN)
+        self.sub.setText("Asking GitHub for the latest version.")
+        self.status.setText("")
+        self.bar.setRange(0, 0)
+        self.b_again.setEnabled(False)
+        self.b_update.setEnabled(False)
+        self._run(updater.latest, self._show, self._failed)
+
+    def _show(self, info):
+        self.info = info
+        self.settings["last_update_check"] = time.time()
+        self._bar_idle()
+        self.b_again.setEnabled(True)
+        ver = info["version"]
+        self.sub.setText(f"Latest on GitHub: {ver}" + (f", released {info['date']}" if info.get("date") else ""))
+        notes = (info.get("notes") or "").strip() or "_No release notes._"
+        self.notes.setMarkdown(f"**What's new in {ver}:**\n\n{notes}")
+        if not updater.is_newer(ver):
+            self._headline(f"You're on the latest version ({APP_VERSION}) ✔", T.GREEN)
+            self.status.setText("Everything is up to date.")
+            self.b_update.setEnabled(False)
+            return
+        self._headline(f"Version {ver} is available", T.CYAN)
+        ok, why = updater.can_install()
+        if not info.get("asset"):
+            ok, why = False, f"The new version has no download for this computer ({updater.asset_name()})."
+        self.b_update.setEnabled(ok)
+        if ok:
+            size = info["asset"].get("size")
+            self.status.setText(f"UPDATE NOW downloads {human_size(size) if size else 'it'}, closes {APP_NAME}, "
+                                f"installs {ver} and opens it again. Your history and settings are kept.")
+        else:
+            self.status.setText(f"{why} Use RELEASE PAGE to download it yourself.")
+
+    def _failed(self, msg):
+        self._bar_idle()
+        self.b_again.setEnabled(True)
+        self._headline("Couldn't check for updates", T.RED)
+        self.sub.setText("")
+        self.status.setText(msg.split(": ", 1)[-1])
+
+    def start_update(self):
+        info = self.info
+        self.b_update.setEnabled(False)
+        self.b_again.setEnabled(False)
+        self._headline(f"Downloading version {info['version']}…", T.CYAN)
+        self.status.setText("Downloading…")
+        self.bar.setRange(0, 0)
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="dlff_dl_")
+
+        def work(progress):
+            pkg = updater.download(info, tmp, lambda d, t: progress(d, t, ""))
+            return updater.prepare_install(pkg, os.getpid())
+
+        self._run(work, self._ready, self._download_failed, progress=True)
+
+    def _progress(self, done, total):
+        if total:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(1000 * done / total))
+            self.status.setText(f"Downloading {human_size(done)} of {human_size(total)}…")
+
+    def _download_failed(self, msg):
+        self._bar_idle()
+        self.b_update.setEnabled(True)
+        self.b_again.setEnabled(True)
+        self._headline("The update didn't download", T.RED)
+        self.status.setText(msg.split(": ", 1)[-1])
+
+    def _ready(self, prepared):
+        cmd, _work = prepared
+        self._bar_idle(1000)
+        self._headline(f"Version {self.info['version']} is ready to install", T.GREEN)
+        self.status.setText(f"{APP_NAME} will close, update itself and open again. This takes a few seconds.")
+        for b in (self.b_update, self.b_again, self.b_page):
+            b.setEnabled(False)
+        updater.start_helper(cmd)       # it waits for this app to close before replacing anything
+        QTimer.singleShot(1200, self._quit)
+
+    def _quit(self):
+        self.accept()
+        if self.parent() is not None:
+            self.parent().close()
+
+
 # ---------------------------------------------------------------- main window
 
 FILTERS = [("all", "ALL FAMILIES"), ("issues", "ANY ISSUE"), ("ghost", "GHOSTS"), ("adobe", "ADOBE CONFLICTS"),
-           ("duplicate", "DUPLICATES"), ("orphan", "ORPHANS"), ("unreadable", "BROKEN FILES")]
+           ("duplicate", "DUPLICATES"), ("orphan", "ORPHANS"), ("unreadable", "BROKEN FILES"),
+           ("recent", "RECENTLY ADDED")]
 SCOPES = [("any", "ANYWHERE"), ("user", "INSTALLED FOR ME"), ("system", "ALL USERS (SYSTEM)"),
           ("adobe", "ADOBE FONTS")]
 
@@ -821,13 +1030,13 @@ class MainWindow(QMainWindow):
 
         self.status_timer = QTimer(self, interval=4000, timeout=self.refresh_status)
         self.status_timer.start()
-        self.log(f"{APP_NAME} v{APP_VERSION}  ·  {'ADMINISTRATOR' if self.admin else 'standard user'}  ·  "
-                 f"backups in {BACKUP_DIR}", "info")
+        self.log(f"{APP_NAME} v{APP_VERSION}  ·  {'ADMINISTRATOR' if self.admin else 'standard user'}", "info")
         if not self.admin:
             self.log("Windows' administrator prompt was declined: only fonts installed for you can be fixed. "
                      "Close and reopen dl_font_fixer and click Yes to fix everything.", "warn")
         QTimer.singleShot(150, self.refresh_status)
         QTimer.singleShot(250, self.scan)
+        QTimer.singleShot(4000, self._auto_update_check)
 
     # ---- layout pieces
     def _build_header(self):
@@ -855,7 +1064,11 @@ class MainWindow(QMainWindow):
         self.chip_adobe.clicked.connect(self.restart_adobe)
         self.chip_reboot = Chip("REBOOT QUEUE")
         self.chip_reboot.clicked.connect(self.show_pending)
-        for ch in (self.chip_cache, self.chip_adobe, self.chip_reboot):
+        self.chip_update = Chip("UPDATES")
+        self.chip_update.clicked.connect(lambda: self.check_updates(self._update_info))
+        self.chip_update.set_state("CHECK FOR UPDATES", T.DIM, "See if a newer version of dl_font_fixer is available")
+        self._update_info = None
+        for ch in (self.chip_cache, self.chip_adobe, self.chip_reboot, self.chip_update):
             lay.addWidget(ch)
         self.b_scan = QPushButton("⟳  RESCAN")
         self.b_scan.setObjectName("primary")
@@ -874,7 +1087,8 @@ class MainWindow(QMainWindow):
         for key, label, col in (("all", "FAMILIES", T.CYAN), ("faces", "FONT FILES", T.DIM),
                                 ("ghost", "GHOSTS", T.RED), ("adobe", "ADOBE CONFLICTS", T.VIOLET),
                                 ("duplicate", "DUPLICATES", T.AMBER), ("orphan", "ORPHANS", T.BLUE),
-                                ("unreadable", "BROKEN", T.RED)):
+                                ("unreadable", "BROKEN", T.RED),
+                                ("recent", f"NEW · {scanner.RECENT_DAYS} DAYS", T.GREEN)):
             t = StatTile(label, col, key)
             t.clicked.connect(lambda _=False, k=key: self.show_everything("all" if k == "faces" else k))
             lay.addWidget(t, 1)
@@ -927,7 +1141,9 @@ class MainWindow(QMainWindow):
                                                           "Creative Cloud again so Adobe Fonts re-sync"),
                ("⟳  RESTART EXPLORER", self.restart_explorer, "Explorer keeps font files open for previews"),
                ("◷  REBOOT QUEUE", self.show_pending, "Files queued for deletion at the next restart"),
-               ("⛁  BACKUPS / RESTORE", self.show_backups, "Every purge is backed up first")]
+               ("☰  HISTORY", self.show_history, "Every font deleted with dl_font_fixer, and when"),
+               ("⬆  CHECK FOR UPDATES", lambda: self.check_updates(self._update_info),
+                "See if a newer version of dl_font_fixer is available")]
         for text, fn, tip in ops:
             b = QPushButton(text)
             b.setObjectName("nav")
@@ -1086,6 +1302,11 @@ class MainWindow(QMainWindow):
                                                  ("duplicate", "duplicate files"), ("orphan", "orphan files"),
                                                  ("unreadable", "broken files")) if s[k]]
             self.log("Found: " + (", ".join(found) if found else "no problems"), "warn" if found else "ok")
+            new = sorted((f for f in self.families if f.recent), key=lambda f: -f.added)
+            if new:
+                self.log(f"Added in the last {scanner.RECENT_DAYS} days: " + ", ".join(
+                    f"{f.name} ({ago(f.added)}{', Adobe Fonts' if f.scopes == {'adobe'} else ''})" for f in new[:10])
+                    + (" …" if len(new) > 10 else "") + "   (filter: RECENTLY ADDED)", "ok")
             self.bar.stop(f"LAST SCAN {datetime.now():%H:%M:%S}  ·  {s['families']} FAMILIES  ·  "
                           f"{sum(s[k] for k in ('ghost', 'orphan', 'unreadable')) + s['duplicate']} ISSUE FILES")
             self.apply_filter()
@@ -1125,7 +1346,10 @@ class MainWindow(QMainWindow):
             iss = fam.issues
             if self.filter == "issues" and not iss:
                 continue
-            if self.filter not in ("all", "issues") and self.filter not in iss:
+            if self.filter == "recent":
+                if not fam.recent:
+                    continue
+            elif self.filter not in ("all", "issues") and self.filter not in iss:
                 continue
             if self.filter == "adobe" and not fam.local_faces:
                 continue
@@ -1137,7 +1361,9 @@ class MainWindow(QMainWindow):
                                                            q in (f.ps_name or "").lower() for f in fam.faces):
                 continue
             out.append(fam)
-        if self.filter != "all":
+        if self.filter == "recent":
+            out.sort(key=lambda f: -f.added)
+        elif self.filter != "all":
             out.sort(key=lambda f: (f.severity(), f.name.lower()))
         self.model.set_items(out)
         label = dict(FILTERS).get(self.filter, "")
@@ -1233,10 +1459,11 @@ class MainWindow(QMainWindow):
                      f"providing it.</p>")
         html = (f"<p style='color:{T.RED}'><b>⚠ This deletes the font from Windows completely.</b></p>"
                 f"<p>Remove <b>{len(faces)}</b> font file(s) from <b>{len(fams)}</b> famil"
-                f"{'y' if len(fams) == 1 else 'ies'}: unload it, delete its registry entry and its file, "
-                f"unlocking the file if a program holds it.</p>"
+                f"{'y' if len(fams) == 1 else 'ies'}: unload it, delete its registry entry and move its file to "
+                f"the Recycle Bin, unlocking the file if a program holds it.</p>"
                 f"<table style='font-family:Consolas;font-size:12px'>{rows}</table>{more}{warn}"
-                f"<p style='color:{T.DIM}'>A backup of every file is saved first (BACKUPS / RESTORE).</p>")
+                f"<p style='color:{T.DIM}'>You can put it back from HISTORY until you empty the Recycle Bin. "
+                f"After that it can't be recovered.</p>")
         if not ask(self, "Delete fonts", html, ok="DELETE", danger=True):
             return
         had_adobe = any("adobe" in f.issues for f in faces)
@@ -1245,8 +1472,12 @@ class MainWindow(QMainWindow):
         def done(res):
             if res is None:
                 return
+            nb = len(res.get("recycled", {}))
             msg = (f"<p>Deleted <b style='color:{T.GREEN}'>{len(res['deleted'])}</b> file(s), removed "
                    f"<b>{res['reg']}</b> registry entr{'y' if res['reg'] == 1 else 'ies'}.</p>")
+            if nb:
+                msg += (f"<p style='color:{T.DIM}'>{nb} file(s) are in the Recycle Bin: HISTORY can put them back "
+                        f"until it's emptied.</p>")
             if res["renamed"] or res["queued"]:
                 msg += (f"<p style='color:{T.AMBER}'>{len(res['renamed'])} locked file(s) renamed to .old, "
                         f"{len(res['queued'])} queued for deletion at the next restart. Windows no longer loads "
@@ -1320,57 +1551,148 @@ class MainWindow(QMainWindow):
             html = "Nothing queued. Locked fonts that can't be deleted right away are queued here."
         info(self, "Reboot queue", html, wide=bool(ops))
 
-    def show_backups(self):
-        bks = actions.list_backups()
-        if not bks:
-            info(self, "Backups", f"No backups yet. Every purge saves the removed files to<br>{esc(BACKUP_DIR)}")
+    def show_history(self):
+        entries = actions.history()
+        if not entries:
+            info(self, "History", "Nothing deleted yet. Every font you delete with dl_font_fixer is listed here "
+                                  "(name, file, registry entry and when).")
             return
+        STATE = {"bin": ("in Recycle Bin  (recoverable)", T.GREEN),
+                 "restored": ("restored", T.CYAN),
+                 "gone": ("deleted  (can't recover)", T.DIM),
+                 "registry": ("dead registry entry removed  (file was already missing)", T.DIM),
+                 "failed": ("FAILED  (file still there)", T.RED)}
         d = QDialog(self)
-        d.setWindowTitle("Backups")
-        d.setMinimumSize(760, 460)
+        d.setWindowTitle("History")
+        d.setMinimumSize(980, 540)
         d.setStyleSheet(f"QDialog {{ background: {T.PANEL}; }}")
         lay = QVBoxLayout(d)
         lay.setContentsMargins(20, 18, 20, 16)
-        h = QLabel("// BACKUPS  ·  restore reinstalls the fonts for your user")
+        n_fonts = sum(len(e.get("items", [])) for e in entries)
+        n_bin = sum(1 for e in entries for i in e.get("items", []) if i["state"] == "bin")
+        h = QLabel(f"// HISTORY  ·  {n_fonts} font file(s) deleted, newest first  ·  {n_bin} still in the "
+                   f"Recycle Bin")
         h.setObjectName("h")
         lay.addWidget(h)
         tree = QTreeWidget()
-        tree.setHeaderLabels(["DATE", "FILES", "FAMILIES"])
-        tree.setRootIsDecorated(False)
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        for b in bks:
-            n = sum(1 for i in b.get("items", []) if i.get("backup_file"))
-            it = QTreeWidgetItem([b.get("date", "").replace("T", "  "), str(n), ", ".join(b.get("families", []))])
-            it.setData(0, Qt.UserRole, b["dir"])
-            tree.addTopLevelItem(it)
+        tree.setHeaderLabels(["WHEN / FONT", "STATUS", "WHERE", "FILE"])
+        tree.setAlternatingRowColors(True)
+        tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        text = []
+        for e in entries:
+            items = e.get("items", [])
+            when = e.get("date", "").replace("T", "  ")
+            fams = sorted({i.get("family", "") for i in items})
+            top = QTreeWidgetItem([when, f"{len(items)} file(s)", "", ", ".join(fams)])
+            top.setForeground(0, QColor(T.CYAN))
+            top.setForeground(1, QColor(T.DIM))
+            top.setForeground(3, QColor(T.DIM))
+            text.append(when)
+            for i in items:
+                label, col = STATE.get(i["state"], (i.get("result", ""), T.DIM))
+                if i["state"] == "gone" and "restart" in i.get("result", ""):
+                    label = "deleted at restart  (can't recover)"
+                hives = " ".join(sorted({r[0] for r in i.get("reg", [])}))
+                where = (i.get("scope", "").upper() + (f" {hives}" if hives else "")).strip()
+                c_ = QTreeWidgetItem([f"{i.get('family', '')} · {i.get('style', '')}", label, where,
+                                      i.get("path", "")])
+                c_.setData(0, Qt.UserRole, (e.get("date"), i.get("path"), i["state"]))
+                c_.setForeground(1, QColor(col))
+                c_.setForeground(2, QColor(T.SCOPE_COLOR.get(i.get("scope"), T.DIM)))
+                tip = [i.get("full_name") or "", i.get("path", "")]
+                tip += [f'{r[0]}  "{r[1]}" = {r[2]}' for r in i.get("reg", [])]
+                if i["state"] == "bin":
+                    tip.append("In the Recycle Bin: select it and click RESTORE to put it back")
+                for col_ in range(4):
+                    c_.setToolTip(col_, "\n".join(t for t in tip if t))
+                top.addChild(c_)
+                text.append(f"  {i.get('family', '')} {i.get('style', '')}  [{label}]  {where}  {i.get('path', '')}")
+            tree.addTopLevelItem(top)
+        tree.expandAll()
+        tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         lay.addWidget(tree, 1)
         row = QHBoxLayout()
-        b_open = QPushButton("OPEN FOLDER")
-        b_open.clicked.connect(lambda: os.startfile(tree.currentItem().data(0, Qt.UserRole) if tree.currentItem()
-                                                    else str(BACKUP_DIR)))
-        b_restore = QPushButton("RESTORE SELECTED")
+        b_restore = QPushButton("⟲  RESTORE FROM RECYCLE BIN")
         b_restore.setObjectName("primary")
+        b_copy = QPushButton("COPY AS TEXT")
+        b_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText("\n".join(text)))
+        b_clear = QPushButton("CLEAR HISTORY")
+        b_clear.setObjectName("danger")
+
+        def picked():
+            keys = []
+            for it in tree.selectedItems():
+                rows = [it.child(k) for k in range(it.childCount())] if it.childCount() else [it]
+                for r in rows:
+                    data = r.data(0, Qt.UserRole)
+                    if data and data[2] == "bin" and data[:2] not in keys:
+                        keys.append(data[:2])
+            return keys
+
+        def sel_changed():
+            n = len(picked())
+            b_restore.setEnabled(n > 0)
+            b_restore.setText(f"⟲  RESTORE {n} FROM RECYCLE BIN" if n else "⟲  RESTORE FROM RECYCLE BIN")
+
+        tree.itemSelectionChanged.connect(sel_changed)
+        sel_changed()
 
         def restore():
-            it = tree.currentItem()
-            if not it:
-                return
-            if ask(d, "Restore", f"Reinstall the fonts from {esc(it.text(0))} for your user?", ok="RESTORE"):
+            keys = picked()
+            if keys and ask(d, "Restore fonts", f"Put {len(keys)} font file(s) back from the Recycle Bin and "
+                                                f"install them again where they were?", ok="RESTORE"):
                 d.accept()
-                self.run_bg(actions.restore_backup, it.data(0, Qt.UserRole), label="RESTORING…",
-                            on_done=lambda _: self.scan())
+                self.run_bg(actions.restore_from_bin, keys, label="RESTORING…", on_done=lambda _: self.scan())
 
         b_restore.clicked.connect(restore)
+
+        def clear():
+            if ask(d, "Clear history", "Forget the list of deleted fonts? Fonts still in the Recycle Bin stay there, "
+                                       "but you'd have to restore them from the Recycle Bin yourself.",
+                   ok="CLEAR", danger=True):
+                actions.clear_history()
+                self.log("History cleared", "info")
+                d.accept()
+
+        b_clear.clicked.connect(clear)
         b_close = QPushButton("CLOSE")
         b_close.clicked.connect(d.accept)
-        row.addWidget(b_open)
-        row.addStretch()
         row.addWidget(b_restore)
+        row.addWidget(b_copy)
+        row.addWidget(b_clear)
+        row.addStretch()
         row.addWidget(b_close)
         lay.addLayout(row)
         winapi.dark_title_bar(int(d.winId()), (10, 14, 21))
         d.exec()
+
+    # ---- updates
+    def check_updates(self, info=None):
+        UpdateDialog(self, info if isinstance(info, dict) else None).exec()
+
+    def _auto_update_check(self):
+        """Quietly check once a day; if there's a newer version, the UPDATES chip lights up."""
+        st = load_settings()
+        if not st.get("auto_update", True) or not updater.app_location():
+            return
+        if time.time() - float(st.get("last_update_check", 0)) < 24 * 3600:
+            return
+        w = Worker(updater.latest, _wants_log=False)
+
+        def done(info):
+            st = load_settings()
+            st["last_update_check"] = time.time()
+            save_settings(st)
+            if info and updater.is_newer(info["version"]):
+                self._update_info = info
+                self.chip_update.set_state(f"UPDATE {info['version']} AVAILABLE", T.GREEN,
+                                           "Click to see what's new and install it")
+                self.log(f"dl_font_fixer {info['version']} is available: click UPDATE in the top bar", "ok")
+
+        w.done.connect(done)
+        w.finished.connect(lambda: self.workers.discard(w))
+        self.workers.add(w)
+        w.start()
 
     # ---- close
     def _save(self):

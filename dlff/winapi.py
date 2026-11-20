@@ -180,6 +180,76 @@ def delete_on_reboot(path):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+# ---------------------------------------------------------------- Recycle Bin
+
+if IS_WIN:
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    shell32.SHFileOperationW.argtypes = [ctypes.POINTER(SHFILEOPSTRUCTW)]
+
+FO_DELETE = 3
+# FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI
+_RECYCLE_FLAGS = 0x0004 | 0x0010 | 0x0040 | 0x0400
+
+
+def recycle(path):
+    """Move a file to the Recycle Bin (silently). True when the file is gone from `path`."""
+    op = SHFILEOPSTRUCTW()
+    op.wFunc = FO_DELETE
+    op.pFrom = str(path) + "\0"            # double-null terminated list
+    op.fFlags = _RECYCLE_FLAGS
+    try:
+        rc = shell32.SHFileOperationW(ctypes.byref(op))
+    except OSError:
+        return False
+    return rc == 0 and not op.fAnyOperationsAborted and not os.path.exists(path)
+
+
+def _read_recycle_info(i_path):
+    """Original path and deletion time from a Recycle Bin $I file: (path, unix_time) or None."""
+    import struct
+    try:
+        data = open(i_path, "rb").read()
+        version, _size, ft = struct.unpack_from("<qqq", data, 0)
+        if version == 2:
+            n = struct.unpack_from("<i", data, 24)[0]
+            orig = data[28:28 + 2 * n].decode("utf-16-le")
+        else:
+            orig = data[24:24 + 520].decode("utf-16-le")
+        return orig.split("\0", 1)[0], ft / 1e7 - 11644473600
+    except Exception:
+        return None
+
+
+def find_in_recycle_bin(original, since=0.0):
+    """Where the Recycle Bin keeps `original` after recycle(): ($R data file, $I info file) or (None, None).
+    Picks the newest match deleted at or after `since`."""
+    drive = os.path.splitdrive(str(original))[0] or "C:"
+    root = os.path.join(drive + os.sep, "$Recycle.Bin")
+    want = os.path.normcase(os.path.normpath(str(original)))
+    best = None
+    try:
+        sid_dirs = [e.path for e in os.scandir(root) if e.is_dir()]
+    except OSError:
+        return None, None
+    for d in sid_dirs:
+        try:
+            infos = [e for e in os.scandir(d) if e.name.upper().startswith("$I")]
+        except OSError:
+            continue
+        for e in infos:
+            meta = _read_recycle_info(e.path)
+            if not meta or os.path.normcase(os.path.normpath(meta[0])) != want or meta[1] < since - 5:
+                continue
+            r = os.path.join(d, "$R" + e.name[2:])
+            if os.path.exists(r) and (best is None or meta[1] > best[0]):
+                best = (meta[1], r, e.path)
+    return (best[1], best[2]) if best else (None, None)
+
+
 # ---------------------------------------------------------------- Restart Manager: who has this file open?
 
 if IS_WIN:

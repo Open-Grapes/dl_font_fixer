@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "dl_font_fixer"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 RELEASE_ASSET = f"{APP_NAME}-windows.zip"
 
 FROZEN = getattr(sys, "frozen", False)
@@ -15,7 +15,8 @@ BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP_NAME
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
-BACKUP_DIR = CONFIG_DIR / "backups"
+BACKUP_DIR = CONFIG_DIR / "backups"      # 1.0-1.1 only; read once into the history
+HISTORY_FILE = CONFIG_DIR / "history.json"
 
 WINDIR = Path(os.environ.get("WINDIR", r"C:\Windows"))
 SYSTEM_FONTS = WINDIR / "Fonts"

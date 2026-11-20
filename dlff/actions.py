@@ -1,4 +1,4 @@
-"""Things that change the system: purge fonts, unlock files, services, caches, Adobe, backups.
+"""Things that change the system: purge fonts, unlock files, services, caches, Adobe, deletion history.
 
 Every function takes `log(text, level)` (level: info | ok | warn | err | cmd) so the window can show a
 terminal-style transcript of what happened. No GUI code here.
@@ -16,7 +16,7 @@ from pathlib import Path
 import psutil
 
 from . import winapi
-from .common import BACKUP_DIR, FONTS_KEY, USER_FONTS, WINDIR
+from .common import BACKUP_DIR, CONFIG_DIR, FONTS_KEY, HISTORY_FILE, USER_FONTS, WINDIR
 
 NO_WINDOW = winapi.NO_WINDOW
 HIVES = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE}
@@ -252,52 +252,154 @@ def check_locks(paths):
     return out
 
 
-# ---------------------------------------------------------------- backup / restore
+# ---------------------------------------------------------------- history (what was deleted)
 
-def _backup_root():
-    d = BACKUP_DIR / datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def list_backups():
-    out = []
-    if BACKUP_DIR.is_dir():
-        for d in sorted(BACKUP_DIR.iterdir(), reverse=True):
-            m = d / "manifest.json"
-            if m.exists():
-                try:
-                    data = json.loads(m.read_text(encoding="utf-8"))
-                    out.append({"dir": str(d), **data})
-                except Exception:
-                    pass
-    return out
+def _read_history():
+    try:
+        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
 
 
-def restore_backup(backup_dir, log=_nolog):
-    """Reinstall fonts from a backup for the current user (no admin needed)."""
-    d = Path(backup_dir)
-    data = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-    USER_FONTS.mkdir(parents=True, exist_ok=True)
+def _write_history(entries):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = HISTORY_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=1), encoding="utf-8")
+    os.replace(tmp, HISTORY_FILE)
+
+
+def _import_old_backups(entries):
+    """1.0/1.1 kept backup folders with a manifest.json; list those deletions in the history too."""
+    if not BACKUP_DIR.is_dir():
+        return entries
+    known = {e.get("date") for e in entries}
+    for d in sorted(BACKUP_DIR.iterdir()):
+        try:
+            data = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("date") in known:
+            continue
+        entries.append({"date": data.get("date", ""), "items": [
+            {"family": i.get("family", ""), "style": i.get("style", ""), "full_name": i.get("full_name", ""),
+             "path": i.get("path", ""), "scope": i.get("scope", ""), "reg": i.get("reg", []),
+             "result": "deleted" if i.get("backup_file") else "registry entry removed (file was already missing)"}
+            for i in data.get("items", [])]})
+    entries.sort(key=lambda e: e.get("date", ""))
+    return entries
+
+
+def item_state(item):
+    """Where a deleted font is now: 'bin' (in the Recycle Bin, can be restored), 'restored', 'gone' (permanently
+    deleted), 'registry' (only a dead registry entry was removed) or 'failed'."""
+    res = item.get("result", "deleted")
+    if res.startswith("registry"):
+        return "registry"
+    if res.startswith("FAILED"):
+        return "failed"
+    if item.get("restored"):
+        return "restored"
+    if item.get("bin") and os.path.exists(item["bin"]):
+        return "bin"
+    if item.get("bin") and os.path.exists(item.get("path", "")):
+        return "restored"           # put back with the Recycle Bin's own Restore
+    return "gone"
+
+
+def history():
+    """Every deletion, newest first: [{date, items: [{family, style, full_name, path, scope, reg, result,
+    bin?, state}]}]."""
+    entries = _import_old_backups(_read_history())
+    for e in entries:
+        for i in e.get("items", []):
+            i["state"] = item_state(i)
+    return list(reversed(entries))
+
+
+def restore_from_bin(keys, log=_nolog):
+    """Put fonts back from the Recycle Bin: file to its old place, registry entries back, loaded again.
+    keys: [(date, path)] identifying history items. Returns how many were restored."""
+    entries = _read_history()
+    want = {tuple(k) for k in keys}
     n = 0
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, FONTS_KEY) as k:
-        for item in data.get("items", []):
-            src = d / item["backup_file"] if item.get("backup_file") else None
-            if not src or not src.exists():
+    admin = winapi.is_admin()
+    for e in entries:
+        for item in e.get("items", []):
+            if (e.get("date"), item.get("path")) not in want or item_state(item) != "bin":
                 continue
-            dst = USER_FONTS / Path(item["path"]).name
+            dst = Path(item["path"])
             if dst.exists():
-                dst = dst.with_name(f"{dst.stem}_restored{dst.suffix}")
-            shutil.copy2(src, dst)
-            names = [r[1] for r in item.get("reg", [])] or [f"{item.get('full_name') or dst.stem} (TrueType)"]
-            for nm in names:
-                winreg.SetValueEx(k, nm, 0, winreg.REG_SZ, str(dst))
+                log(f"{dst.name}: a file with that name is already there, skipped", "warn")
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(item["bin"], dst)
+            except OSError as ex:
+                log(f"{dst.name}: couldn't move it out of the Recycle Bin ({ex})", "err")
+                continue
+            try:
+                os.remove(item["bin_info"])         # the Recycle Bin's own record of it
+            except OSError:
+                pass
+            for hive, name, data in item.get("reg", []):
+                if hive == "HKLM" and not admin:
+                    log(f"HKLM \"{name}\" needs administrator rights, not restored", "warn")
+                    continue
+                try:
+                    with winreg.CreateKeyEx(HIVES[hive], FONTS_KEY, 0,
+                                            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
+                        winreg.SetValueEx(k, name, 0, winreg.REG_SZ, data)
+                except OSError as ex:
+                    log(f"registry {hive} \"{name}\": {ex}", "err")
             winapi.add_font_resource(dst)
+            item["restored"] = datetime.now().isoformat(timespec="seconds")
             n += 1
-            log(f"restored {dst.name}", "ok")
-    winapi.broadcast_font_change()
-    log(f"Restored {n} font file(s) for this user", "ok")
+            log(f"restored {item.get('family', '')} {item.get('style', '')}  ->  {dst}", "ok")
+    if n:
+        _write_history(entries)
+        winapi.broadcast_font_change()
+    log(f"Restored {n} font file(s) from the Recycle Bin", "ok" if n else "warn")
     return n
+
+
+def clear_history():
+    _write_history([])
+    if BACKUP_DIR.is_dir():
+        shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+
+
+def _record(faces, res):
+    """Add one purge to the history file."""
+    done = set(res["deleted"])
+    queued = set(res["queued"])
+    failed = set(res["failed"])
+    items = []
+    for f in faces:
+        if not f.exists:
+            result = "registry entry removed (file was already missing)"
+        elif f.path in res["recycled"]:
+            result = "recycled"
+        elif f.path in done:
+            result = "deleted"
+        elif f.path in failed:
+            result = "FAILED (file still there)"
+        elif any(q.startswith(f.path) for q in queued):
+            result = "deleted at next restart"
+        elif any(r.startswith(f.path) for r in res["renamed"]):
+            result = "renamed to .old (locked)"
+        else:
+            result = "deleted"
+        item = {"family": f.family, "style": f.style, "full_name": f.full_name, "ps_name": f.ps_name,
+                "path": f.path, "scope": f.scope, "reg": [list(r) for r in f.reg], "result": result}
+        if f.path in res["recycled"]:
+            item["bin"], item["bin_info"] = res["recycled"][f.path]
+        items.append(item)
+    try:
+        entries = _import_old_backups(_read_history())
+        entries.append({"date": datetime.now().isoformat(timespec="seconds"), "items": items})
+        _write_history(entries)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- purge
@@ -333,41 +435,42 @@ def _try_delete(path):
         return False
 
 
-def purge(faces, log=_nolog, unlock=True):
-    """Remove fonts completely: backup -> unload -> registry -> delete file -> unlock -> rename / reboot queue.
+def _remove(path, res, log):
+    """Move `path` to the Recycle Bin (so it can be restored from History); delete it outright only when the
+    Recycle Bin can't take it. False when the file is locked and still there."""
+    t0 = time.time()
+    if winapi.recycle(path):
+        r, i = winapi.find_in_recycle_bin(path, t0)
+        res["deleted"].append(path)
+        if r:
+            res["recycled"][path] = [r, i]
+            log(f"moved to Recycle Bin: {path}", "ok")
+        else:
+            log(f"deleted {path} (the Recycle Bin didn't keep it)", "ok")
+        return True
+    if os.path.exists(path) and _try_delete(path):
+        res["deleted"].append(path)
+        log(f"deleted {path} (Recycle Bin not available)", "ok")
+        return True
+    return not os.path.exists(path)
 
-    faces: scanner.Face objects. Returns {"deleted", "renamed", "queued", "failed", "backup"}.
+
+def purge(faces, log=_nolog, unlock=True):
+    """Remove fonts completely: unload -> registry -> file to the Recycle Bin -> unlock -> rename / reboot queue.
+    Every purge is written to the history; files in the Recycle Bin can be restored from there.
+
+    faces: scanner.Face objects. Returns {"deleted", "renamed", "queued", "failed", "reg"}.
     """
     admin = winapi.is_admin()
     faces = [f for f in faces if f.purgeable]
-    res = {"deleted": [], "renamed": [], "queued": [], "failed": [], "backup": None, "reg": 0}
+    res = {"deleted": [], "recycled": {}, "renamed": [], "queued": [], "failed": [], "reg": 0}
     if not faces:
         log("Nothing to purge (Adobe Fonts and Windows system fonts are never touched)", "warn")
         return res
     need_admin = [f for f in faces if f.scope != "user" or any(h == "HKLM" for h, *_ in f.reg)]
     if need_admin and not admin:
         log(f"{len(need_admin)} face(s) are installed for all users: they need administrator rights. "
-            f"Use ADMIN in the top bar to restart elevated.", "warn")
-
-    # 1. backup
-    bdir = _backup_root()
-    items = []
-    for f in faces:
-        item = {"path": f.path, "family": f.family, "style": f.style, "full_name": f.full_name,
-                "scope": f.scope, "reg": f.reg, "backup_file": None}
-        if f.exists and os.path.exists(f.path):
-            dst = bdir / f"{len(items):03d}_{Path(f.path).name}"
-            try:
-                shutil.copy2(f.path, dst)
-                item["backup_file"] = dst.name
-            except OSError as e:
-                log(f"backup of {f.path} failed: {e}", "warn")
-        items.append(item)
-    (bdir / "manifest.json").write_text(json.dumps(
-        {"date": datetime.now().isoformat(timespec="seconds"), "families": sorted({f.family for f in faces}),
-         "items": items}, indent=2), encoding="utf-8")
-    res["backup"] = str(bdir)
-    log(f"backup saved to {bdir}", "ok")
+            f"Reopen the app and click Yes on the administrator prompt.", "warn")
 
     # 2. unload from this session, 3. registry
     for f in faces:
@@ -388,10 +491,7 @@ def purge(faces, log=_nolog, unlock=True):
     for f in faces:
         if not f.exists:
             continue
-        if _try_delete(f.path):
-            res["deleted"].append(f.path)
-            log(f"deleted {f.path}", "ok")
-        else:
+        if not _remove(f.path, res, log):
             pending.append(f.path)
 
     # 5. unlock and retry
@@ -419,10 +519,7 @@ def purge(faces, log=_nolog, unlock=True):
         time.sleep(0.4)
         still = []
         for p in pending:
-            if _try_delete(p):
-                res["deleted"].append(p)
-                log(f"deleted {p}", "ok")
-            else:
+            if not _remove(p, res, log):
                 still.append(p)
         pending = still
 
@@ -460,6 +557,7 @@ def purge(faces, log=_nolog, unlock=True):
         start_explorer(log)
     winapi.broadcast_font_change()
 
+    _record(faces, res)
     log(f"PURGE DONE  deleted {len(res['deleted'])}  renamed {len(res['renamed'])}  "
         f"reboot-queued {len(res['queued'])}  failed {len(res['failed'])}  registry {res['reg']}",
         "ok" if not res["failed"] else "warn")

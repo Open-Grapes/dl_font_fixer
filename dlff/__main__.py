@@ -3,6 +3,7 @@
   dl_font_fixer.exe                       open the window (asks Windows for administrator rights first)
   dl_font_fixer.exe --no-elevate          open the window without asking for administrator rights
   dl_font_fixer.exe --scan-report FILE    scan and write a JSON report (no changes), for build tests
+  dl_font_fixer.exe --check-update FILE   ask GitHub for the latest version, write the answer to FILE (JSON)
 """
 
 import json
@@ -26,8 +27,22 @@ def scan_report(out_file):
     return 0 if "error" not in res else 1
 
 
+def check_update(out_file):
+    from . import updater
+    try:
+        info = updater.latest()
+        res = {"version": info["version"], "newer": updater.is_newer(info["version"]),
+               "asset": (info["asset"] or {}).get("name")}
+    except Exception as e:
+        res = {"error": str(e)}
+    Path(out_file).write_text(json.dumps(res), encoding="utf-8")
+    return 0 if "error" not in res else 1
+
+
 def main():
     args = sys.argv[1:]
+    if args[:1] == ["--check-update"] and len(args) > 1:
+        return check_update(args[1])
     if args[:1] == ["--scan-report"] and len(args) > 1:
         return scan_report(args[1])
     # The app always runs as administrator: fonts for all users, the font cache and the reboot queue need it.

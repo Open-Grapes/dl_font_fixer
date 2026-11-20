@@ -14,16 +14,20 @@ Issues per face:
 No GUI code here.
 """
 
+import json
 import os
 import re
+import time
 import winreg
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .common import ADOBE_LIVETYPE, FONTS_KEY, SYSTEM_FONTS, USER_FONTS
+from .common import ADOBE_LIVETYPE, CONFIG_DIR, FONTS_KEY, SYSTEM_FONTS, USER_FONTS
 
 FONT_EXT = {".ttf", ".otf", ".ttc", ".otc", ".fon", ".fnt"}
 ISSUE_ORDER = ["ghost", "adobe", "duplicate", "orphan", "unreadable"]
+RECENT_DAYS = 14
+SEEN_FILE = CONFIG_DIR / "seen.json"        # font -> when dl_font_fixer first saw it (for "recently added")
 ISSUE_LABEL = {"ghost": "GHOST", "adobe": "ADOBE CONFLICT", "duplicate": "DUPLICATE",
                "orphan": "ORPHAN", "unreadable": "BROKEN"}
 
@@ -63,6 +67,11 @@ class Face:
     issues: set = field(default_factory=set)
     note: str = ""
     extra: bool = False            # a duplicate copy that can go (one copy of each duplicate is kept)
+    added: float = 0.0             # when this font was installed (first seen), 0 = unknown / long ago
+
+    @property
+    def recent(self):
+        return self.added > 0 and time.time() - self.added < RECENT_DAYS * 86400
 
     @property
     def protected(self):
@@ -97,6 +106,14 @@ class Family:
     @property
     def local_faces(self):
         return [f for f in self.faces if f.scope != "adobe"]
+
+    @property
+    def added(self):
+        return max((f.added for f in self.faces), default=0.0)
+
+    @property
+    def recent(self):
+        return any(f.recent for f in self.faces)
 
     def severity(self):
         iss = self.issues
@@ -305,6 +322,8 @@ def scan(progress=None, include_adobe=True):
         if f.ps_name and f.ps_name.lower() in local_ps:
             f.issues.add("adobe")
 
+    _mark_added(items)
+
     fams = {}
     for f in items:
         k = norm(f.family) or norm(Path(f.path).stem)
@@ -327,8 +346,71 @@ def scan(progress=None, include_adobe=True):
         "adobe_faces": len(adobe),
         "user": sum(1 for f in items if f.scope == "user"),
         "system": sum(1 for f in items if f.scope == "system"),
+        "recent": sum(1 for fam in fam_list if fam.recent),
     }
     return fam_list, stats
+
+
+def _seen_key(f):
+    # Creative Cloud re-writes its Adobe Fonts files under new names when it re-syncs: key them by font name
+    return f"adobe:{(f.ps_name or f.full_name).lower()}" if f.scope == "adobe" else f.path.lower()
+
+
+def _birth(path):
+    try:
+        st = os.stat(path)
+        return getattr(st, "st_birthtime", st.st_ctime)
+    except OSError:
+        return 0.0
+
+
+def _mark_added(items):
+    """Set Face.added: when the font was installed. dl_font_fixer remembers every font it has seen, so a font
+    is new when it wasn't there at the previous scan (Windows Update rewriting Segoe UI or Creative Cloud
+    re-syncing doesn't count). On the very first scan the file's creation date is used for fonts you installed."""
+    try:
+        seen = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+        first_run = False
+    except Exception:
+        seen, first_run = {}, True
+    now = time.time()
+    out = {}
+    for f in items:
+        if not f.exists:
+            continue
+        k = _seen_key(f)
+        if k in out:
+            f.added = out[k]
+            continue
+        if k in seen:
+            t = seen[k]
+        elif f.scope == "adobe":
+            t = 0.0 if first_run else now
+        elif first_run and f.scope == "system" and not f.reg:
+            t = 0.0
+        elif first_run and f.scope == "system" and (f.protected or _birth(f.path) and
+                                                    abs(_birth(f.path) - _windows_fonts_birth()) < 3600):
+            t = 0.0         # shipped with or updated by Windows
+        else:
+            b = _birth(f.path)
+            t = min(b, now) if b else now
+        f.added = t
+        out[k] = t
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        SEEN_FILE.write_text(json.dumps(out), encoding="utf-8")
+    except OSError:
+        pass
+
+
+_WIN_BIRTH = []
+
+
+def _windows_fonts_birth():
+    """Creation time of Segoe UI: Windows feature updates rewrite all its own fonts at about that time."""
+    if not _WIN_BIRTH:
+        _WIN_BIRTH.append(_birth(SYSTEM_FONTS / "segoeui.ttf"))
+    return _WIN_BIRTH[0]
 
 
 _WEIGHTS = [("hairline", 0), ("extralight", 2), ("ultralight", 2), ("thin", 1), ("semilight", 3),

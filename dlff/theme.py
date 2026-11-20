@@ -40,6 +40,7 @@ QPushButton:pressed {{ background: rgba(0,229,255,0.18); }}
 QPushButton:disabled {{ color: {FAINT}; border-color: {LINE}; }}
 QPushButton#primary {{ border-color: {CYAN}; color: {CYAN}; text-align: center; }}
 QPushButton#primary:hover {{ background: {CYAN}; color: {BG}; }}
+QPushButton#primary:disabled {{ border-color: {LINE}; color: {FAINT}; }}
 QPushButton#danger {{ border-color: {RED}; color: {RED}; text-align: center; }}
 QPushButton#danger:hover {{ background: {RED}; color: {BG}; }}
 QPushButton#danger:disabled {{ border-color: {LINE}; color: {FAINT}; }}
